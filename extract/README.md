@@ -1,13 +1,92 @@
-# 数据提取：数学概念历史地图
+# 数据提取：数学声明历史地图
 
-从 mathlib4 源码**纯文本**提取精选数学概念/定理，无需编译 Lean。
+从 mathlib4 源码**纯文本**提取数学声明/概念，无需编译 Lean。
 
-## 两个提取器
+## 三个提取器
 
 | 脚本 | 输出 | 用途 |
 |---|---|---|
-| `extract-concepts.mjs` | `web/concepts.json` | **概念历史地图**（当前 demo 的数据源） |
+| `extract-decls.mjs` | `web/decls.json` | **声明历史地图**（当前 demo 的数据源，15.3 万节点） |
+| `extract-concepts.mjs` | `web/concepts.json` | 概念历史地图（yaml 精选 650 概念，早期 demo，已弃用） |
 | `extract-graph.mjs` | `web/graph.json` | 模块 import 依赖图（早期 demo，已弃用） |
+
+## 声明提取器（extract-decls.mjs，当前主力）
+
+```bash
+node extract/extract-decls.mjs
+```
+
+扫描 `Mathlib/**/*.lean` 的**每一类数学声明**作为节点（≈15.3 万）：
+
+| 类型 | 数量 | 类型权重 T |
+|---|---|---|
+| theorem | 88,492 | 0.4 |
+| lemma | 41,663 | 0.2 |
+| def | 19,960 | 0.7 |
+| class | 1,519 | 0.85 |
+| structure | 1,144 | 0.85 |
+| inductive | 164 | 0.9 |
+| axiom | 0（数学目录内无命名 axiom） | 1.0 |
+
+### 统一坐标公式（学科簇布局，全部节点同一套计算，无手工坐标）
+
+**X = 学科簇**（网络模式的点团 = 整体模式的圆圈，两种模式对位）：
+
+$$
+x_i = \text{学科簇槽位} + \frac{t_i - t_{簇min}}{t_{簇max} - t_{簇min}} \cdot (\text{槽宽}) + \varepsilon_x
+$$
+
+- 每个学科一个紧凑横槽，按学科**平均首次进库时间**从左到右排列；槽宽 ∝ √count。
+- 簇内节点按其模块时间在槽内铺开（左早右晚）。
+- `t_i` = 声明所在模块文件**首次进库的 git 提交时间**（`git log --diff-filter=A`，精确到文件级，8,810 个模块各有独立时间，2021-05 → 2026-08）。
+
+$$
+y_i = 0.7\,C(c_i) + 0.2\,D(m_i) + 0.05\,T(k_i) + 0.05\,F(i)
+$$
+
+- `C(c_i)` = **社区位置**：学科（顶层目录）内所有节点依赖深度的平均值 → 决定"属于哪片大陆"。基础（Logic/Order/Data/SetTheory 深度 0.30–0.47）在下，抽象构造（Probability/MeasureTheory/AG/Analysis 0.77–0.85）在上。
+- `D(m_i)` = **模块依赖深度**：模块 import DAG 的最长路径（`log(1+d)/log(1+d_max)`）。
+- `T(k_i)` = **类型权重**（上表）。
+- `F(i)` = **确定性局部扰动**（hash ∈ [−0.5,0.5]）。
+- 最后 min-max 全局拉伸铺满 16:9 画布。
+
+### 工作流程
+
+1. **扫描源码**：递归遍历所有 `.lean`，剥离块注释 `/- -/` 与行注释 `--`，
+   匹配声明（`@[attr]` + `noncomputable/private/mutual/scoped` 修饰 + 7 类关键字 + 名字）。
+   - 注释剥离是**关键**：docstring 示例里的伪声明被正确排除。
+   - 仅保留以 `Mathlib.` 开头的 import；工具目录（`Control`/`Lean`/`Util`/`Tactic`/`Testing`/`Deprecated`）排除。
+2. **首次进库时间**：一条 `git log --reverse --diff-filter=A --format=%at --name-only -- Mathlib/` 拿到全部模块的 add 提交时间。
+3. **依赖深度**：Kosaraju 缩点（mathlib 有 1 个 869 模块巨型互导环，先缩点成 7,513 个 SCC）→ 无环图上拓扑 DP 最长路径（最大 134）。
+4. **学科簇布局**（x=按时间排的簇槽 + 簇内时间梯度，y=统一深度公式）+ 连线（模块 import 近似，端点=两模块各自第一个声明）。
+5. **输出**：列式（SoA）紧凑 JSON。
+
+### 输出格式（web/decls.json）
+
+```jsonc
+{
+  "meta": {
+    "conceptCount": 152942, "edgeCount": 21155, "dirCount": 25,
+    "layout": "cluster-formula", "world": { "width": 1600, "height": 900, "pad": 70 },
+    "typeWeights": { "theorem": 0.4, "lemma": 0.2, "def": 0.7, "class": 0.85, "structure": 0.85, "inductive": 0.9, "axiom": 1.0 },
+    "yearMin": 2021, "yearMax": 2026, "maxDepth": 134
+  },
+  "dirs": [ { "name": "Algebra", "count": 24218, "cx": 286.1, "cy": 581.4, "meanDepthY": 0.473 } ],
+  "nodes": {
+    "label": ["add_assoc", "..."],
+    "kind": ["lemma", ...],        // theorem|lemma|def|class|structure|inductive|axiom
+    "dir": ["Algebra", ...],
+    "module": ["Mathlib.Algebra.Group.Defs", ...],
+    "depth": [0.35, ...],          // 归一化 y 分量（结构深度）
+    "x": [286.1, ...],             // 学科簇内坐标（簇质心 = 整体模式圆圈圆心）
+    "y": [581.4, ...],
+    "year": [2022.3, ...]          // 文件级首次进库真实年份（hover 直接显示）
+  },
+  "edges": [ [0, 3509], ... ]
+}
+```
+
+## 概念提取器（extract-concepts.mjs，已弃用）
 
 ## 概念提取器（extract-concepts.mjs）
 
@@ -70,6 +149,19 @@ node extract/extract-concepts.mjs
 - 定位失败的 decl（短名被改写/太泛）会被丢弃，最终 650 节点 vs 776 原始。
 
 ## 当前统计（2026-08）
+
+### 声明提取器（extract-decls.mjs，当前）
+
+| 项 | 值 |
+|---|---|
+| 声明节点 | 152,942（7 类） |
+| 依赖边 | 21,155 |
+| 学科 | 25 |
+| 类型分布 | theorem 88,492 / lemma 41,663 / def 19,960 / class 1,519 / structure 1,144 / inductive 164 |
+| 形式化时间范围 | 2021-05 → 2026-08（文件级首次进库） |
+| 最大依赖深度 | 134（缩点后最长路径） |
+
+### 概念提取器（extract-concepts.mjs，已弃用）
 
 | 项 | 值 |
 |---|---|
