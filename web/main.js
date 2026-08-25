@@ -1,41 +1,40 @@
-// main.js — 主线程：加载图数据、调度布局 worker、Canvas 渲染、缩放/平移、LOD 分级。
-// 布局坐标由 layout-worker.js 计算（或从 localStorage 恢复），主线程只负责绘制。
+// main.js — 数学概念「科研地图」渲染器。
+// 数据来自 concepts.json（确定性布局已内嵌 x/y，无需力导向）。
+//   X 轴 = 历史时间（早→晚 从左到右）
+//   Y 轴 = 三层抽象（上层=具体/离散代数，中层=基础骨架，下层=抽象/连续）
+// 一张 16:9 的世界坐标（1600×900）绘制，滚轮缩放、拖拽平移、悬停看概念。
 
 import { zoom, zoomIdentity } from 'https://cdn.jsdelivr.net/npm/d3-zoom@3/+esm';
 import { select } from 'https://cdn.jsdelivr.net/npm/d3-selection@3/+esm';
 
 // ---- 常量 ----
-const ZOOM_LOD = 0.5;          // 缩放阈值：k<0.5 学科聚合视图，k≥0.5 模块级视图
-const LABEL_K = 7;             // 放大到该倍数后显示模块名
-const NODE_R_SCREEN = 2.0;     // 模块节点屏幕半径（像素）
-const EDGE_ALPHA = 0.16;
+const LABEL_K = 1.6;           // 放大到该倍数显示概念名
+const NODE_R_SCREEN = 3.0;     // 概念节点基准屏幕半径
+const EDGE_ALPHA = 0.18;
 const EDGE_COLOR = '150,160,180';
-const CULL_MARGIN = 60;        // 视口外扩裁切余量（世界单位）
-const BRANCH_R = 26;           // 学科聚合节点屏幕半径（像素）
+const CULL_MARGIN = 80;
+const WORLD_W = 1600;
+const WORLD_H = 900;
+const TIER_LABELS = ['具体 / 离散代数', '基础通用骨架', '抽象 / 连续'];
 
 const canvas = document.getElementById('graph');
 const ctx = canvas.getContext('2d');
 const $ = (id) => document.getElementById(id);
 
-// ---- 全局状态 ----
 const state = {
-  data: null,           // { nodes, edges, branchGraph }
-  branchById: new Map(),// branchId -> {label,color,rgb}
-  edgePairs: [],        // [[sIdx,tIdx], ...]
-  adj: [],              // adj[i] = [{idx, edgeIndex}]
-  pos: null,            // [Float32Array xs, Float32Array ys]
+  data: null,
+  branchColor: new Map(),  // branch -> {label, color, rgb, hsl}
+  idxByDecl: new Map(),
+  edgePairs: [],           // [[sIdx,tIdx], ...]
+  adj: [],
+  degrees: [],
+  maxDegree: 1,
   transform: { x: 0, y: 0, k: 1 },
-  hover: -1,            // hover 节点索引
+  hover: -1,
   hiddenBranches: new Set(),
-  layoutRunning: true,
   dpr: 1,
-  edgeWeightMax: 1,
-  branchGraph: { nodes: [], edges: [] },
   branchMembers: new Map(),
 };
-
-let layoutWorker = null;
-let useWorker = true;
 
 // ---- 初始化 ----
 async function init() {
@@ -45,29 +44,18 @@ async function init() {
   setupUI();
 
   try {
-    const res = await fetch('graph.json');
+    const res = await fetch('concepts.json');
     if (!res.ok) throw new Error('HTTP ' + res.status);
     state.data = await res.json();
   } catch (err) {
-    showToast('加载 graph.json 失败：' + err.message);
+    showToast('加载 concepts.json 失败：' + err.message);
     return;
   }
   buildGraph();
   buildLegend();
-  $('loadingText').textContent = '力导向布局计算中…';
-
-  // 尝试从 localStorage 恢复上次布局坐标
-  const cached = loadCachedPositions();
-  if (cached) {
-    applyPositions(cached.xs, cached.ys);
-    state.layoutRunning = false;
-    $('loading').classList.add('hidden');
-    fitView(0);
-    requestRender();
-    showToast('已恢复上次布局缓存');
-  } else {
-    startLayout();
-  }
+  setTitle();
+  $('loading').classList.add('hidden');
+  fitView(0);
   requestAnimationFrame(render);
 }
 
@@ -80,166 +68,66 @@ function resize() {
   requestRender();
 }
 
+function setTitle() {
+  const m = state.data.meta;
+  const tl = m.tierLabels;
+  $('title').innerHTML =
+    `<h1>🧮 数学概念历史地图</h1>` +
+    `<p>${m.conceptCount} 个概念 · ${m.edgeCount} 条依赖 · ${m.branchCount} 学科</p>` +
+    `<p>横轴=历史年代 · 纵轴=抽象层级 · 滚轮缩放 · 拖拽平移 · 悬停看概念</p>`;
+}
+
 // ---- 数据整理 ----
 function buildGraph() {
-  const { nodes, edges, branchGraph } = state.data;
-  const idxById = new Map();
-  nodes.forEach((n, i) => idxById.set(n.id, i));
+  const { nodes, edges } = state.data;
 
-  // 学科配色表（来自 branchGraph 内嵌颜色，与提取脚本一致）
-  for (const b of branchGraph.nodes) {
-    const [r, g, bl] = b.color;
-    state.branchById.set(b.id, {
-      label: b.label,
-      color: `rgb(${r},${g},${bl})`,
-      rgb: `${r},${g},${bl}`,
-    });
-  }
-
-  // 学科聚合节点：补上字符串颜色
-  state.branchGraph.nodes = branchGraph.nodes.map((b) => {
-    const [r, g, bl] = b.color;
-    return { ...b, x: 0, y: 0, fill: `rgb(${r},${g},${bl})`, rgb: `${r},${g},${bl}` };
+  const branches = [...new Set(nodes.map((n) => n.branch))];
+  branches.forEach((b, i) => {
+    const h = Math.round((i * 137.5) % 360); // 黄金角配色
+    state.branchColor.set(b, { label: b, color: `hsl(${h},72%,58%)`, rgb: hslToRgb(h) });
   });
-  state.branchGraph.edges = branchGraph.edges;
 
-  // 边 → 索引对
-  state.edgePairs = edges.map((e) => [idxById.get(e.source), idxById.get(e.target)]);
+  nodes.forEach((n) => state.idxByDecl.set(n.decl, n.id));
 
-  // 邻接表（hover 高亮用）
+  state.edgePairs = edges
+    .map((e) => [state.idxByDecl.get(e.source), state.idxByDecl.get(e.target)])
+    .filter(([s, t]) => s != null && t != null);
+
   state.adj = nodes.map(() => []);
-  state.edgePairs.forEach(([s, t], ei) => {
-    state.adj[s].push({ idx: t, edge: ei });
-    state.adj[t].push({ idx: s, edge: ei });
+  state.edgePairs.forEach(([s, t]) => {
+    state.adj[s].push({ idx: t });
+    state.adj[t].push({ idx: s });
   });
+  state.degrees = state.adj.map((a) => a.length);
+  state.maxDegree = Math.max(1, ...state.degrees);
 
-  // 学科边权重归一化
-  if (state.branchGraph.edges.length) {
-    state.edgeWeightMax = Math.max(...state.branchGraph.edges.map((e) => e.weight));
-  }
-
-  // 每学科成员索引
   state.branchMembers = new Map();
-  nodes.forEach((n, i) => {
+  nodes.forEach((n) => {
     if (!state.branchMembers.has(n.branch)) state.branchMembers.set(n.branch, []);
-    state.branchMembers.get(n.branch).push(i);
+    state.branchMembers.get(n.branch).push(n.id);
   });
 }
 
-// 根据当前节点坐标计算各学科质心
-function computeBranchPositions() {
-  for (const b of state.branchGraph.nodes) {
-    const members = state.branchMembers.get(b.id) || [];
-    if (!members.length) continue;
-    let sx = 0, sy = 0;
-    for (const i of members) { sx += state.pos[0][i]; sy += state.pos[1][i]; }
-    b.x = sx / members.length;
-    b.y = sy / members.length;
-  }
+function hslToRgb(h) {
+  const s = 0.72, l = 0.58;
+  const c = (1 - Math.abs(2 * l - 1)) * s;
+  const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+  const m = l - c / 2;
+  let r = 0, g = 0, b = 0;
+  if (h < 60) { r = c; g = x; }
+  else if (h < 120) { r = x; g = c; }
+  else if (h < 180) { g = c; b = x; }
+  else if (h < 240) { g = x; b = c; }
+  else if (h < 300) { r = x; b = c; }
+  else { r = c; b = x; }
+  return `${Math.round((r + m) * 255)},${Math.round((g + m) * 255)},${Math.round((b + m) * 255)}`;
 }
 
-// ---- 布局调度（worker 优先，失败回退主线程）----
-function startLayout() {
-  $('loading').classList.remove('hidden');
-  state.layoutRunning = true;
-  const payload = {
-    nodeCount: state.data.nodes.length,
-    edges: state.edgePairs,
-    alphaDecay: 0.02,
-  };
-  try {
-    layoutWorker = new Worker(new URL('./layout-worker.js', import.meta.url), { type: 'module' });
-  } catch {
-    useWorker = false;
-  }
-  if (useWorker) {
-    layoutWorker.onmessage = (e) => {
-      const m = e.data;
-      if (m.type === 'tick') {
-        applyPositions(m.xs, m.ys);
-        if (state.layoutRunning && !cachedFrame) { fitView(0); cachedFrame = true; }
-        $('loading').classList.add('hidden');
-        requestRender();
-      } else if (m.type === 'end') {
-        state.layoutRunning = false;
-        saveCachedPositions();
-      }
-    };
-    layoutWorker.onerror = () => {
-      useWorker = false;
-      layoutWorker?.terminate();
-      mainThreadLayout(payload);
-    };
-    layoutWorker.postMessage({ type: 'start', ...payload });
-  } else {
-    mainThreadLayout(payload);
-  }
-}
-
-let cachedFrame = false;
-
-// 回退：主线程内跑 d3-force（降低帧率，避免卡死 UI）
-async function mainThreadLayout(payload) {
-  showToast('Web Worker 不可用，改用主线程布局（性能较低）');
-  try {
-    const d3f = await import('https://cdn.jsdelivr.net/npm/d3-force@3/+esm');
-    const nodes = Array.from({ length: payload.nodeCount }, () => ({ index: 0 }));
-    const links = payload.edges.map(([s, t]) => ({ source: s, target: t }));
-    const sim = d3f.forceSimulation(nodes)
-      .force('link', d3f.forceLink(links).id((d) => d.index).distance(24))
-      .force('charge', d3f.forceManyBody().strength(-42))
-      .force('collide', d3f.forceCollide().radius(1.5))
-      .force('center', d3f.forceCenter(0, 0))
-      .alphaDecay(0.02).alphaMin(0.001);
-    const step = () => {
-      for (let i = 0; i < 3; i++) sim.tick();
-      const xs = new Float32Array(nodes.length);
-      const ys = new Float32Array(nodes.length);
-      for (let i = 0; i < nodes.length; i++) { xs[i] = nodes[i].x ?? 0; ys[i] = nodes[i].y ?? 0; }
-      applyPositions(xs, ys);
-      if (!cachedFrame) { fitView(0); cachedFrame = true; }
-      $('loading').classList.add('hidden');
-      requestRender();
-      if (sim.alpha() < 0.001) { state.layoutRunning = false; saveCachedPositions(); return; }
-      setTimeout(step, 40);
-    };
-    step();
-  } catch (err) {
-    showToast('布局失败：' + err.message);
-    $('loading').classList.add('hidden');
-  }
-}
-
-function applyPositions(xs, ys) {
-  state.pos = [xs, ys];
-  computeBranchPositions();
-}
-
-// ---- 坐标缓存（localStorage）----
-function CACHE_KEY() { return `mathlib-graph-pos-v1-${state.data?.nodes.length}`; }
-function saveCachedPositions() {
-  try {
-    const xs = Array.from(state.pos[0], (v) => +v.toFixed(1));
-    const ys = Array.from(state.pos[1], (v) => +v.toFixed(1));
-    localStorage.setItem(CACHE_KEY(), JSON.stringify({ xs, ys, t: Date.now() }));
-  } catch { /* localStorage 满/禁用时忽略 */ }
-}
-function loadCachedPositions() {
-  try {
-    const raw = localStorage.getItem(CACHE_KEY());
-    if (!raw) return null;
-    const { xs, ys } = JSON.parse(raw);
-    if (!xs || !ys || xs.length !== state.data.nodes.length) return null;
-    return { xs: new Float32Array(xs), ys: new Float32Array(ys) };
-  } catch { return null; }
-}
-
-// ---- 缩放 / 平移 / 视图动画 ----
-const zoomBehavior = zoom().scaleExtent([0.05, 60]).on('zoom', (ev) => {
+// ---- 缩放/平移 ----
+const zoomBehavior = zoom().scaleExtent([0.2, 30]).on('zoom', (ev) => {
   state.transform = ev.transform;
   requestRender();
 });
-
 function setupZoom() {
   const sel = select(canvas);
   sel.call(zoomBehavior);
@@ -248,7 +136,6 @@ function setupZoom() {
 }
 
 let tweenRAF = 0;
-// 手动 tween 相机（避免依赖 d3-transition 跨 bundle 的 prototype 补丁）
 function animateTransformTo(target, dur = 600) {
   cancelAnimationFrame(tweenRAF);
   const s = { ...state.transform };
@@ -257,11 +144,7 @@ function animateTransformTo(target, dur = 600) {
   const stepT = (now) => {
     const u = Math.min(1, (now - t0) / dur);
     const e = ease(u);
-    state.transform = {
-      x: s.x + (target.x - s.x) * e,
-      y: s.y + (target.y - s.y) * e,
-      k: s.k + (target.k - s.k) * e,
-    };
+    state.transform = { x: s.x + (target.x - s.x) * e, y: s.y + (target.y - s.y) * e, k: s.k + (target.k - s.k) * e };
     requestRender();
     if (u < 1) tweenRAF = requestAnimationFrame(stepT);
   };
@@ -269,27 +152,14 @@ function animateTransformTo(target, dur = 600) {
 }
 
 function fitView(dur = 500) {
-  if (!state.pos) return;
-  const xs = state.pos[0], ys = state.pos[1];
-  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-  for (let i = 0; i < xs.length; i++) {
-    if (xs[i] < minX) minX = xs[i]; if (xs[i] > maxX) maxX = xs[i];
-    if (ys[i] < minY) minY = ys[i]; if (ys[i] > maxY) maxY = ys[i];
-  }
-  const w = innerWidth, h = innerHeight, pad = 70;
-  const k = Math.max(0.05, Math.min(
-    Math.min((w - pad * 2) / Math.max(1, maxX - minX), (h - pad * 2) / Math.max(1, maxY - minY)),
-    1.2
-  ));
-  const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
-  const target = zoomIdentity.translate(w / 2 - cx * k, h / 2 - cy * k).scale(k);
-  animateTransformTo(target, dur);
+  const k = Math.min((innerWidth - 80) / WORLD_W, (innerHeight - 60) / WORLD_H);
+  const cx = WORLD_W / 2, cy = WORLD_H / 2;
+  animateTransformTo(zoomIdentity.translate(innerWidth / 2 - cx * k, innerHeight / 2 - cy * k).scale(k), dur);
 }
 
-// ---- UI 事件 ----
+// ---- UI ----
 function setupUI() {
   $('btnFit').onclick = () => fitView();
-  $('btnRelayout').onclick = () => { cachedFrame = false; startLayout(); };
   $('search').addEventListener('input', (e) => onSearch(e.target.value));
   canvas.addEventListener('mousemove', onMouseMove);
   canvas.addEventListener('mouseleave', () => { state.hover = -1; requestRender(); });
@@ -302,43 +172,35 @@ function onSearch(q) {
   const nodes = state.data.nodes;
   let matches = [];
   for (let i = 0; i < nodes.length; i++) {
-    if (nodes[i].id.toLowerCase().includes(q)) {
+    if (nodes[i].label.toLowerCase().includes(q) || nodes[i].decl.toLowerCase().includes(q)) {
       matches.push(i);
       if (matches.length >= 20) break;
     }
   }
   if (matches.length) {
     state.hover = matches[0];
-    $('searchHint').textContent = `匹配 ${matches.length}+ 模块，自动跳到第一个`;
+    $('searchHint').textContent = `匹配 ${matches.length}+ 个概念，跳到第一个`;
     flyToNode(matches[0]);
-  } else {
-    $('searchHint').textContent = '无匹配';
-    state.hover = -1;
-  }
+  } else { $('searchHint').textContent = '无匹配'; state.hover = -1; }
   requestRender();
 }
 
 function flyToNode(idx) {
-  if (!state.pos) return;
-  const x = state.pos[0][idx], y = state.pos[1][idx];
-  const w = innerWidth, h = innerHeight;
-  const k = Math.max(state.transform.k, 2.2);
-  const target = zoomIdentity.translate(w / 2 - x * k, h / 2 - y * k).scale(k);
-  animateTransformTo(target, 600);
+  const n = state.data.nodes[idx];
+  const k = Math.max(state.transform.k, 3.0);
+  animateTransformTo(zoomIdentity.translate(innerWidth / 2 - n.x * k, innerHeight / 2 - n.y * k).scale(k), 600);
 }
 
 function onMouseMove(ev) {
-  if (state.transform.k < ZOOM_LOD || !state.pos) { state.hover = -1; return; }
   const rect = canvas.getBoundingClientRect();
   const sx = ev.clientX - rect.left, sy = ev.clientY - rect.top;
   const { x, y, k } = state.transform;
   const wx = (sx - x) / k, wy = (sy - y) / k;
-  const hitR = 10 / k;
+  const hitR = 12 / k;
   let best = -1, bestD = hitR * hitR;
-  const xs = state.pos[0], ys = state.pos[1];
-  for (let i = 0; i < xs.length; i++) {
-    const dx = xs[i] - wx, dy = ys[i] - wy;
-    const d2 = dx * dx + dy * dy;
+  const nodes = state.data.nodes;
+  for (let i = 0; i < nodes.length; i++) {
+    const dx = nodes[i].x - wx, dy = nodes[i].y - wy, d2 = dx * dx + dy * dy;
     if (d2 < bestD) { bestD = d2; best = i; }
   }
   state.hover = best;
@@ -360,168 +222,182 @@ function render() {
   ctx.clearRect(0, 0, w, h);
   ctx.fillStyle = '#0d1117';
   ctx.fillRect(0, 0, w, h);
+  if (!state.data) return;
 
   const { x, y, k } = state.transform;
-  if (!state.pos) return;
   const vLeft = -x / k, vRight = (w - x) / k, vTop = -y / k, vBottom = (h - y) / k;
-
   ctx.save();
   ctx.translate(x, y);
   ctx.scale(k, k);
 
-  const lodIsAggregate = k < ZOOM_LOD;
-  $('lodLabel').textContent = lodIsAggregate ? '学科聚合视图' : '模块级视图';
+  drawTierBands();
+  drawEdges(vLeft, vRight, vTop, vBottom);
+  drawNodes(vLeft, vRight, vTop, vBottom, k);
+  if (state.hover >= 0) drawHover(k);
 
-  if (lodIsAggregate) {
-    drawBranchGraph(vLeft, vRight, vTop, vBottom, k);
-  } else {
-    drawModuleGraph(vLeft, vRight, vTop, vBottom, k);
-  }
-
-  if (state.hover >= 0 && !lodIsAggregate) drawHover(k);
   ctx.restore();
 
+  drawAxes(k);
   $('zoomK').textContent = k.toFixed(2) + '×';
+  $('nodeCount').textContent = state.data.meta.conceptCount;
+  $('edgeCount').textContent = state.data.meta.edgeCount;
 }
 
-function drawBranchGraph(vLeft, vRight, vTop, vBottom, k) {
-  const g = state.branchGraph;
-  // 学科间依赖边（方向从 source 到 target，用 source 色，透明度随权重）
-  ctx.lineCap = 'round';
-  for (const e of g.edges) {
-    const a = g.nodes.find((n) => n.id === e.source);
-    const b = g.nodes.find((n) => n.id === e.target);
-    if (!a || !b) continue;
-    const f = e.weight / state.edgeWeightMax;
-    ctx.strokeStyle = `rgba(${a.rgb},${0.1 + 0.35 * f})`;
-    ctx.lineWidth = Math.max(0.8, 1.8 * f) / k;
+// 三层抽象背景带 + 分隔线
+function drawTierBands() {
+  const tiers = state.data.tiers;
+  const fills = ['rgba(255,200,90,0.05)', 'rgba(130,180,255,0.05)', 'rgba(255,110,160,0.05)'];
+  const halfH = 150;
+  tiers.forEach((t, i) => {
+    ctx.fillStyle = fills[i];
+    ctx.fillRect(0, t.y - halfH, WORLD_W, halfH * 2);
+    ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+    ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y);
+    ctx.moveTo(0, t.y + halfH);
+    ctx.lineTo(WORLD_W, t.y + halfH);
     ctx.stroke();
-  }
-  const r = BRANCH_R / k;
-  for (const b of g.nodes) {
-    if (state.hiddenBranches.has(b.id)) continue;
-    if (b.x < vLeft - r || b.x > vRight + r || b.y < vTop - r || b.y > vBottom + r) continue;
-    ctx.beginPath();
-    ctx.arc(b.x, b.y, r, 0, Math.PI * 2);
-    ctx.fillStyle = b.fill + '40';
-    ctx.fill();
-    ctx.lineWidth = 2 / k;
-    ctx.strokeStyle = b.fill;
-    ctx.stroke();
-    ctx.fillStyle = '#e6edf3';
-    ctx.font = `${13 / k}px "Segoe UI", "Microsoft YaHei", sans-serif`;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(b.label, b.x, b.y);
-    ctx.fillStyle = '#8b949e';
-    ctx.font = `${10 / k}px "Segoe UI", sans-serif`;
-    ctx.fillText(`${b.count} 模块`, b.x, b.y + r + 13 / k);
-  }
-  $('nodeCount').textContent = g.nodes.length;
-  $('edgeCount').textContent = g.edges.length;
+  });
 }
 
-function drawModuleGraph(vLeft, vRight, vTop, vBottom, k) {
-  const xs = state.pos[0], ys = state.pos[1];
-  const m = CULL_MARGIN / k; // 世界单位外扩
+// 依赖边（只画可见范围内的）
+function drawEdges(vLeft, vRight, vTop, vBottom, k) {
+  const nodes = state.data.nodes;
+  const m = CULL_MARGIN / k;
   const sLeft = vLeft - m, sRight = vRight + m, sTop = vTop - m, sBot = vBottom + m;
-
-  // 1) 边：单条 path 批量绘制，视口裁剪
-  let visibleEdges = 0;
   ctx.beginPath();
   for (const [s, t] of state.edgePairs) {
-    const x1 = xs[s], y1 = ys[s], x2 = xs[t], y2 = ys[t];
-    if ((x1 < sLeft && x2 < sLeft) || (x1 > sRight && x2 > sRight) ||
-        (y1 < sTop && y2 < sTop) || (y1 > sBot && y2 > sBot)) continue;
-    ctx.moveTo(x1, y1);
-    ctx.lineTo(x2, y2);
-    visibleEdges++;
+    if (state.hiddenBranches.has(nodes[s].branch) && state.hiddenBranches.has(nodes[t].branch)) continue;
+    const x1 = nodes[s].x, y1 = nodes[s].y, x2 = nodes[t].x, y2 = nodes[t].y;
+    if ((x1 < sLeft && x2 < sLeft) || (x1 > sRight && x2 > sRight) || (y1 < sTop && y2 < sTop) || (y1 > sBot && y2 > sBot)) continue;
+    ctx.moveTo(x1, y1); ctx.lineTo(x2, y2);
   }
   ctx.strokeStyle = `rgba(${EDGE_COLOR},${EDGE_ALPHA})`;
   ctx.lineWidth = 1 / k;
   ctx.stroke();
+}
 
-  // 2) 节点：按分支分组，每组一条 path
-  const r = NODE_R_SCREEN / k;
-  let visibleNodes = 0;
-  for (const b of state.branchGraph.nodes) {
-    if (state.hiddenBranches.has(b.id)) continue;
-    const members = state.branchMembers.get(b.id) || [];
+// 概念节点（按学科着色，大小 ∝ 关联度）
+function drawNodes(vLeft, vRight, vTop, vBottom, k) {
+  const nodes = state.data.nodes;
+  const m = CULL_MARGIN / k;
+  const sLeft = vLeft - m, sRight = vRight + m, sTop = vTop - m, sBot = vBottom + m;
+  const baseR = NODE_R_SCREEN / k;
+  const sqrtMax = Math.sqrt(state.maxDegree);
+
+  for (const [branch, members] of state.branchMembers) {
+    if (state.hiddenBranches.has(branch)) continue;
+    const info = state.branchColor.get(branch);
     ctx.beginPath();
     for (const i of members) {
-      const px = xs[i], py = ys[i];
-      if (px < sLeft || px > sRight || py < sTop || py > sBot) continue;
-      ctx.moveTo(px + r, py);
-      ctx.arc(px, py, r, 0, Math.PI * 2);
-      visibleNodes++;
+      const n = nodes[i];
+      if (n.x < sLeft || n.x > sRight || n.y < sTop || n.y > sBot) continue;
+      const r = baseR * (0.5 + 1.8 * Math.sqrt(state.degrees[i]) / sqrtMax);
+      ctx.moveTo(n.x + r, n.y);
+      ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
     }
-    ctx.fillStyle = b.fill;
+    ctx.fillStyle = info.color;
     ctx.fill();
   }
 
-  // 3) 深度放大后显示模块短名
+  // 概念名标签
   if (k >= LABEL_K) {
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'middle';
-    ctx.font = `${11 / k}px "Segoe UI", sans-serif`;
-    for (const b of state.branchGraph.nodes) {
-      const members = state.branchMembers.get(b.id) || [];
+    ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    ctx.font = `${11 / k}px "Segoe UI","Microsoft YaHei",sans-serif`;
+    for (const [branch, members] of state.branchMembers) {
+      if (state.hiddenBranches.has(branch)) continue;
       for (const i of members) {
-        const px = xs[i], py = ys[i];
-        if (px < vLeft || px > vRight || py < vTop || py > vBottom) continue;
-        ctx.fillStyle = 'rgba(230,237,243,0.85)';
-        ctx.fillText(state.data.nodes[i].id.split('.').slice(-1)[0], px + r * 1.6, py);
+        const n = nodes[i];
+        if (n.x < vLeft || n.x > vRight || n.y < vTop || n.y > vBottom) continue;
+        ctx.fillStyle = 'rgba(230,237,243,0.82)';
+        ctx.fillText(n.label.replace(/\$/g, ''), n.x + baseR * 1.8, n.y);
       }
     }
   }
+}
 
-  $('nodeCount').textContent = visibleNodes;
-  $('edgeCount').textContent = visibleEdges;
+// 坐标轴标注（历史时间轴 + 三层抽象轴）
+function drawAxes(k) {
+  const m = state.data.meta;
+  const s = 1 / k; // 轴文字随世界缩放而放大（保持世界坐标下固定字号）
+
+  ctx.save();
+  ctx.translate(state.transform.x, state.transform.y);
+  ctx.scale(state.transform.k, state.transform.k);
+
+  const left = m.world.plot.left, right = m.world.plot.right;
+  const top = m.world.plot.top, bottom = m.world.plot.bottom;
+
+  // X 轴（历史时间）
+  const axisY = bottom + 30;
+  ctx.strokeStyle = 'rgba(230,237,243,0.35)';
+  ctx.lineWidth = 1.2;
+  ctx.beginPath(); ctx.moveTo(left, axisY); ctx.lineTo(right, axisY); ctx.stroke();
+  ctx.fillStyle = '#e6edf3';
+  ctx.font = '14px "Segoe UI","Microsoft YaHei",sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  ctx.fillText('历史时间 →（定理出现年代）', (left + right) / 2, axisY + 10);
+  // 两端年代标注
+  ctx.fillStyle = '#8b949e';
+  ctx.font = '12px "Segoe UI",sans-serif';
+  ctx.textAlign = 'left';
+  ctx.fillText(`${m.eraMin} 年`, left, axisY + 10);
+  ctx.textAlign = 'right';
+  ctx.fillText(`${m.eraMax} 年`, right, axisY + 10);
+
+  // Y 轴（三层抽象）
+  const axisX = left - 24;
+  ctx.fillStyle = '#e6edf3';
+  ctx.font = '13px "Segoe UI","Microsoft YaHei",sans-serif';
+  ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+  const tiers = state.data.tiers;
+  tiers.forEach((t) => {
+    ctx.save();
+    ctx.translate(axisX, t.y);
+    ctx.rotate(-Math.PI / 2);
+    ctx.textAlign = 'center';
+    ctx.fillText(TIER_LABELS[t.id], 0, 0);
+    ctx.restore();
+  });
+
+  ctx.restore();
 }
 
 function drawHover(k) {
   const i = state.hover;
-  const x = state.pos[0][i], y = state.pos[1][i];
-  const branch = state.data.nodes[i].branch;
-  const info = state.branchById.get(branch);
-  const color = info?.color || '#fff';
-  // 相连边高亮
+  const n = state.data.nodes[i];
+  const info = state.branchColor.get(n.branch);
   ctx.beginPath();
-  for (const { idx: n } of state.adj[i]) {
-    ctx.moveTo(x, y);
-    ctx.lineTo(state.pos[0][n], state.pos[1][n]);
+  for (const { idx: t } of state.adj[i]) {
+    ctx.moveTo(n.x, n.y);
+    ctx.lineTo(state.data.nodes[t].x, state.data.nodes[t].y);
   }
   ctx.strokeStyle = 'rgba(255,255,255,0.6)';
   ctx.lineWidth = 1.2 / k;
   ctx.stroke();
-  // 节点描边
-  const r = NODE_R_SCREEN * 1.9 / k;
-  ctx.beginPath();
-  ctx.arc(x, y, r, 0, Math.PI * 2);
-  ctx.strokeStyle = '#fff';
-  ctx.lineWidth = 1.6 / k;
-  ctx.stroke();
-  // 信息条
-  const id = state.data.nodes[i].id;
-  const label = info?.label || branch;
-  $('hoverInfo').textContent = `${id} · ${label} · ${state.adj[i].length} 条依赖`;
-  $('hoverInfo').style.color = color;
+  const r = (NODE_R_SCREEN / k) * (0.5 + 1.8 * Math.sqrt(state.degrees[i]) / Math.sqrt(state.maxDegree)) * 1.4;
+  ctx.beginPath(); ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.8 / k; ctx.stroke();
+  const tierName = TIER_LABELS[n.tier];
+  $('hoverInfo').textContent = `${n.label.replace(/\$/g, '')} · ${n.decl} · ${n.branch} · ${n.era} 年`;
+  $('hoverInfo').style.color = info.color;
+  $('lodLabel').textContent = tierName;
 }
 
 // ---- 图例 ----
 function buildLegend() {
   const el = $('legend');
   el.innerHTML = '<div style="font-weight:600;margin-bottom:4px;color:var(--muted);">学科图例（点击开关）</div>';
-  for (const b of state.branchGraph.nodes) {
+  const sorted = [...state.branchColor.entries()].sort((a, b) => state.branchMembers.get(b[0]).length - state.branchMembers.get(a[0]).length);
+  for (const [branch, info] of sorted) {
     const row = document.createElement('div');
     row.className = 'item row';
-    row.innerHTML = `<span><span class="sw" style="background:${b.fill}"></span>${b.label}</span><span class="cnt">${b.count}</span>`;
+    const count = state.branchMembers.get(branch).length;
+    row.innerHTML = `<span><span class="sw" style="background:${info.color}"></span>${branch}</span><span class="cnt">${count}</span>`;
     row.onclick = () => {
-      if (state.hiddenBranches.has(b.id)) state.hiddenBranches.delete(b.id);
-      else state.hiddenBranches.add(b.id);
-      row.classList.toggle('off', state.hiddenBranches.has(b.id));
+      if (state.hiddenBranches.has(branch)) state.hiddenBranches.delete(branch);
+      else state.hiddenBranches.add(branch);
+      row.classList.toggle('off', state.hiddenBranches.has(branch));
       requestRender();
     };
     el.appendChild(row);
