@@ -23,7 +23,8 @@
     #title p { color: var(--muted); font-size: 11.5px; }
     #status { top: 14px; right: 14px; text-align: right; min-width: 150px; }
     #status b { color: #79c0ff; }
-    #hud { bottom: 14px; left: 14px; display: flex; gap: 14px; align-items: flex-start; }
+    #hud { bottom: 62px; left: 14px; display: flex; gap: 14px; align-items: flex-start; transition: opacity 0.15s; }
+    #hud.collapsed { display: none; }
     #hud .gauge { display: flex; flex-direction: column; align-items: flex-start; }
     #hud .gauge b { font-size: 13px; }
     #hud .gauge span { color: var(--muted); font-size: 11px; }
@@ -38,6 +39,12 @@
     #toolbar { bottom: 14px; right: 14px; display: flex; gap: 8px; }
     #toolbar button { background: rgba(120,140,170,0.15); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 6px 12px; cursor: pointer; font-size: 12px; }
     #toolbar button:hover { background: rgba(120,140,170,0.3); }
+    #toolbar button.active { background: #58a6ff; border-color: #58a6ff; color: #0d1117; font-weight: 600; }
+    #toolbar .sep { width: 1px; background: var(--border); margin: 2px 0; }
+
+    #zoombar { bottom: 14px; left: 14px; padding: 4px; }
+    #zoombar button { width: 32px; height: 32px; font-size: 20px; line-height: 1; background: rgba(120,140,170,0.15); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; cursor: pointer; }
+    #zoombar button:hover { background: rgba(120,140,170,0.3); }
 
     #searchbox { top: 60px; right: 14px; width: 220px; }
     #searchbox input { width: 100%; background: rgba(0,0,0,0.35); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 7px 10px; font-size: 12.5px; outline: none; }
@@ -58,9 +65,9 @@
   <canvas id="graph"></canvas>
 
   <div id="title" class="panel">
-    <h1>🧮 数学概念历史地图</h1>
-    <p>横轴=历史年代 · 纵轴=抽象层级 · 16:9 科研绘图</p>
-    <p>滚轮缩放 · 拖拽平移 · 悬停看概念 · 放大看标签</p>
+    <h1>🧮 数学声明历史地图</h1>
+    <p>横轴=学科簇(按首次进库时间排) · 纵轴=结构深度 · 16:9 科研绘图</p>
+    <p>滚轮缩放 · 拖拽平移 · 悬停看声明 · 放大看标签</p>
   </div>
 
   <div id="status" class="panel">
@@ -69,23 +76,30 @@
   </div>
 
   <div id="searchbox" class="panel">
-    <input id="search" type="text" placeholder="搜索概念，如 kernel / Cauchy / group…" />
+    <input id="search" type="text" placeholder="搜索声明，如 kernel / Cauchy / group…" />
     <div class="hint" id="searchHint"></div>
   </div>
 
   <div id="hud" class="panel">
-    <div class="gauge"><b id="nodeCount">–</b><span>概念总数</span></div>
+    <div class="gauge"><b id="nodeCount">–</b><span>声明总数</span></div>
     <div class="gauge"><b id="edgeCount">–</b><span>依赖连线</span></div>
     <div id="legend"></div>
   </div>
 
   <div id="toolbar" class="panel">
+    <button id="btnOverview" class="active">🌐 整体模式</button>
+    <button id="btnNetwork">🔗 网络模式</button>
+    <span class="sep"></span>
     <button id="btnFit">⤢ 重置视图</button>
+  </div>
+
+  <div id="zoombar" class="panel">
+    <button id="btnHudToggle" title="收起图例面板">−</button>
   </div>
 
   <div id="loading">
     <div class="spinner"></div>
-    <p id="loadingText">加载概念地图数据…</p>
+    <p id="loadingText">加载声明地图数据（15.3 万节点，约 17.7 MB）…</p>
   </div>
 
   <div class="toast" id="toast"></div>
