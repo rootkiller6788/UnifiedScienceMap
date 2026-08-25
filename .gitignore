@@ -13,3 +13,7 @@ scripts/.rm_set_option_progress.jsonl
 
 # Output of scripts/export_crossrefs.lean
 /crossrefs.json
+
+# Node.js (力导向图 demo 可能用到)
+node_modules/
+package-lock.json
