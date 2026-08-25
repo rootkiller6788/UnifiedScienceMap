@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>数学概念依赖力导向图 · mathlib4</title>
+  <title>数学概念历史地图 · mathlib4</title>
   <style>
     :root {
       --bg: #0d1117;
@@ -58,35 +58,34 @@
   <canvas id="graph"></canvas>
 
   <div id="title" class="panel">
-    <h1>🧮 数学概念依赖力导向图</h1>
-    <p>mathlib4 模块 import 依赖 · 8,402 模块 · 26,108 边</p>
-    <p>滚轮缩放 · 拖拽平移 · 悬停看依赖 · 放大看细节</p>
+    <h1>🧮 数学概念历史地图</h1>
+    <p>横轴=历史年代 · 纵轴=抽象层级 · 16:9 科研绘图</p>
+    <p>滚轮缩放 · 拖拽平移 · 悬停看概念 · 放大看标签</p>
   </div>
 
   <div id="status" class="panel">
-    <div>缩放 <b id="zoomK">1.0×</b> · <span id="lodLabel">学科聚合视图</span></div>
+    <div>缩放 <b id="zoomK">1.0×</b> · <span id="lodLabel">三层抽象</span></div>
     <div id="hoverInfo" style="color:var(--muted); font-size:11px;"></div>
   </div>
 
   <div id="searchbox" class="panel">
-    <input id="search" type="text" placeholder="搜索模块，如 Topology / NumberTheory…" />
+    <input id="search" type="text" placeholder="搜索概念，如 kernel / Cauchy / group…" />
     <div class="hint" id="searchHint"></div>
   </div>
 
   <div id="hud" class="panel">
-    <div class="gauge"><b id="nodeCount">–</b><span>当前显示节点</span></div>
-    <div class="gauge"><b id="edgeCount">–</b><span>当前显示连线</span></div>
+    <div class="gauge"><b id="nodeCount">–</b><span>概念总数</span></div>
+    <div class="gauge"><b id="edgeCount">–</b><span>依赖连线</span></div>
     <div id="legend"></div>
   </div>
 
   <div id="toolbar" class="panel">
-    <button id="btnRelayout">⟳ 重新布局</button>
     <button id="btnFit">⤢ 重置视图</button>
   </div>
 
   <div id="loading">
     <div class="spinner"></div>
-    <p id="loadingText">加载数据…</p>
+    <p id="loadingText">加载概念地图数据…</p>
   </div>
 
   <div class="toast" id="toast"></div>

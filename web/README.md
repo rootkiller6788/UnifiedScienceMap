@@ -1,62 +1,67 @@
-# 🧮 数学概念依赖力导向图（web）
+# 🧮 数学概念历史地图（web）
 
-mathlib4 模块 import 依赖的可视化 demo：**8,402 个模块 / 26,108 条依赖边 / 13 个学科**。
+mathlib4 精选数学概念/定理的 **16:9 科研绘图**：横轴=历史年代，纵轴=三层抽象。
 
 ## 运行
 
-因为 `fetch('graph.json')` 与 Web Worker 都要求 http 环境，**不能直接双击打开 index.html**，需起本地静态服务器：
+因为 `fetch('concepts.json')` 需要 http 环境，**不能直接双击打开 index.html**，需起本地静态服务器：
 
 ```bash
 # 方式一：Python
-python -m http.server 8000 -d web
+python -m http.server 8756 --directory web
 
 # 方式二：Node
-npx serve web -l 8000
+npx serve web -l 8756
 ```
 
-然后浏览器打开 `http://localhost:8000`。
+然后浏览器打开 `http://localhost:8756`。
+
+## 布局语义
+
+- **横轴（X）= 历史时间**：按定理/学科的历史出现年代排名，左早右晚（−500 年 → 1950 年）。
+- **纵轴（Y）= 三层抽象**：
+  - **上层**：具体 / 离散代数 —— 群、环、域、线性代数、组合、数论、几何、数系
+  - **中层**：基础通用骨架 —— 集合论、逻辑、范畴论、序理论
+  - **下层**：抽象 / 连续 —— 拓扑、分析、测度、概率、分布、动力系统、微分几何
+- 布局是**确定性的**（非力导向）：团内网格打包，团间不重叠，无随机抖动。
 
 ## 功能
 
 | 交互 | 说明 |
 |---|---|
-| 滚轮缩放 | 缩放 → 切换 LOD 层级 |
+| 滚轮缩放 | 缩放画布 |
 | 拖拽平移 | 平移画布 |
-| 悬停模块 | 高亮该模块及其全部依赖连线 |
-| 搜索框 | 按模块名定位（如 `Topology`、`NumberTheory`） |
+| 悬停节点 | 高亮该概念及其依赖连线，显示概念/decl/学科/年代 |
+| 搜索框 | 按概念名或 decl 定位（如 `group`、`Cauchy`、`Pythagorean`） |
 | 图例 | 点击学科开关该分支显隐 |
-| ⟳ 重新布局 | 重新跑力导向仿真 |
-| ⤢ 重置视图 | 回到自适应全局视图 |
+| ⤢ 重置视图 | 回到 16:9 全局视图 |
 
-## LOD 分级（不同尺度显示不同细节）
+## 视觉编码
 
-- **远视图（缩放 < 0.5×）**：只显示 13 个学科聚合大节点 + 学科间依赖（边粗细/透明度反映依赖强度）。
-- **近视图（≥ 0.5×）**：显示全部模块节点与 import 连线，按学科着色。
-- **深放大（≥ 7×）**：叠加显示模块短名。
-- 全程视口裁剪：只绘制落在屏幕内的节点/边，保证流畅。
+- **节点颜色** = 学科（黄金角色轮，21 色区分）。
+- **节点大小** ∝ 关联度（连接的依赖边数越多，节点越大）。
+- 三层背景带以极淡色区分，X 轴两端标注年代范围，Y 轴左侧竖排三层名称。
 
 ## 架构
 
 ```
 web/
-├── index.html          # 页面外壳 + HUD + 图例 + 搜索
-├── main.js             # 主线程：渲染、缩放/平移、LOD、交互、worker 调度
-├── layout-worker.js    # Web Worker：d3-force 力导向布局（不卡 UI）
-└── graph.json          # 数据（由 extract/ 生成，勿手改）
+├── index.html      # 页面外壳 + HUD + 图例 + 搜索
+├── main.js         # 渲染器：Canvas 绘制 + 缩放/平移 + 坐标轴 + 交互
+└── concepts.json   # 数据（由 extract/extract-concepts.mjs 生成，勿手改）
 ```
 
-- **布局**：d3-force（Barnes-Hut 近似斥力），在 Web Worker 中逐帧步进，坐标通过
-  `transferable` 缓冲区回传主线程；收敛后缓存到 localStorage，下次秒开。
-- **渲染**：Canvas 2D 批量 path 绘制（边单条 path、节点按学科分组），
-  预留升级 WebGL 的路径（应对未来几十万声明级节点）。
+- **渲染**：Canvas 2D 批量 path 绘制（节点按学科分组、边单条 path），视口裁剪。
+- **无布局计算**：坐标内嵌在 concepts.json，前端秒开（无 Web Worker / 力导向）。
 - **数据**：见 [../extract/README.md](../extract/README.md)。
 
 ## 依赖（CDN，无构建步骤）
 
-- `d3-force@3`（Worker 内）、`d3-zoom@3`、`d3-selection@3`（jsdelivr ESM）
-- 首次加载需联网拉取 CDN 与 graph.json（3.3 MB）。
+- `d3-zoom@3`、`d3-selection@3`（jsdelivr ESM）
+- 首次加载需联网拉取 CDN 与 concepts.json（约 220 KB）。
 
 ## 已知边界
 
-- import 依赖是「代码组织耦合」，不是「定理 ⇒ 定理」推导链（见 extract README）。
-- 声明级（定理/定义粒度）图谱是下一步升级：需编译 mathlib 并读 olean 常量依赖。
+- 历史年代 `era` 是**近似**（按学科映射，非每个定理的精确年代），见 extract README。
+- 依赖边是「模块 import 近似」，非严格定理推导链。
+- 声明级（几十万定理/定义粒度）图谱是下一步升级：需编译 mathlib 读 olean 常量依赖。
