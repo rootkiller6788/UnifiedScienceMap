@@ -3,7 +3,8 @@
 //   X = 数学形式化时间（模块首次进库，2021→2026）
 //   Y = 0.7·社区深度 + 0.2·模块深度 + 0.05·类型权重 + 0.05·局部扰动（基础低、构造高）
 // LOD：两种干净模式——远视图画 25 学科聚合块；放大后全矢量绘制声明网络（无模糊栅格）。
-// 性能：hover 用空间网格索引（非 O(n) 全扫）；节点按度降序 + 屏幕网格限流（每格 1 点，满格即停）。
+// 性能：空间索引（hover 查邻居 + 节点视口裁剪都 O(视口内) 而非 O(n)）；邻接表 O(deg)；
+//      屏幕格位图去重 + 复用数组（无每帧 GC）；15 万节点任意缩放流畅。
 // 连线：不悬停一律灰；悬停时同领域连线用领域色、跨领域连线用两色渐变，节点/线发光。
 
 import { zoom, zoomIdentity } from 'https://cdn.jsdelivr.net/npm/d3-zoom@3/+esm';
@@ -22,6 +23,11 @@ const GRID_CELL = 26;          // hover 空间网格单元（世界像素）
 const SCREEN_CELL = 20;        // 高保真节点屏幕密度限流单元（屏幕像素）
 const MAX_DRAWN = 8000;        // 每帧最多绘制的高保真节点数
 const MAX_LABELS = 220;        // 每帧最多绘制的标签数
+const MAX_EDGES = 6000;        // 每帧最多 stroke 的可见边数（低缩放边太密时降噪+提速）
+
+// 节点世界半径：屏幕尺寸随缩放温和增长（放大视图节点也变大，而非恒定 2.2px 显得缩小）
+// k=1→2.2px，k=3→3.4px，k=8→5px，k=20→7.3px，k=40→9.7px
+const nodeR = (k) => NODE_R_SCREEN * Math.pow(k, 0.4) / k;
 
 const canvas = document.getElementById('graph');
 const ctx = canvas.getContext('2d');
@@ -35,9 +41,12 @@ const state = {
   degrees: null,            // Int32Array
   maxDegree: 1,
   dirEdges: [],             // 学科间聚合边 [{s,t,w}]
-  degreeOrder: [],          // 按度降序的节点索引（高保真限流用）
   drawnList: [],            // 本帧实际绘制的高保真节点（标签/悬停用）
-  hoverGrid: new Map(),     // 'cx,cy' -> [节点索引]
+  hoverGrid: new Map(),     // 'cx,cy' -> [节点索引]（空间索引，桶内按度降序）
+  adj: null,                // 邻接表（hover 查邻居 O(deg)，不再全量扫边）
+  visited: new Uint8Array(0), // 屏幕格位图（节点去重，复用，避免每帧 new Map）
+  perDirPool: [],           // drawCrispNodes 每帧复用的 perDir 数组池
+  listPool: [],             // drawCrispNodes 每帧复用的 list
   transform: { x: 0, y: 0, k: 1 },
   fitK: 1,                  // 最远视图缩放（整图铺满屏）＝缩放下限
   mode: 'overview',         // 'overview' 整体模式（学科聚合）| 'network' 网络模式（声明网络）
@@ -63,7 +72,6 @@ async function init() {
   }
   buildGraph();
   buildLegend();
-  setTitle();
   $('loading').classList.add('hidden');
   fitView(0);
   requestAnimationFrame(render);
@@ -86,14 +94,6 @@ function resize() {
   requestRender();
 }
 
-function setTitle() {
-  const m = state.data.meta;
-  $('title').innerHTML =
-    `<h1>🧮 数学声明历史地图</h1>` +
-    `<p>${m.conceptCount.toLocaleString()} 个声明 · ${m.edgeCount.toLocaleString()} 条依赖 · ${m.dirCount} 学科</p>` +
-    `<p>横轴=形式化时间(${m.yearMin}→${m.yearMax}) · 纵轴=结构深度 · 远看学科 · 放大看声明</p>`;
-}
-
 // ---- 数据整理 ----
 function buildGraph() {
   const { nodes, edges, dirs } = state.data;
@@ -112,11 +112,21 @@ function buildGraph() {
   for (let i = 0; i < n; i++) state.dirMembers[state.nodeDirIdx[i]].push(i);
 
   const deg = new Int32Array(n);
-  for (const [s, t] of edges) { deg[s]++; deg[t]++; }
+  const adj = new Array(n).fill(null);
+  for (const [s, t] of edges) {
+    deg[s]++; deg[t]++;
+    if (adj[s] === null) adj[s] = [];
+    adj[s].push(t);
+    if (adj[t] === null) adj[t] = [];
+    adj[t].push(s);
+  }
   let maxDeg = 1;
   for (let i = 0; i < n; i++) if (deg[i] > maxDeg) maxDeg = deg[i];
   state.degrees = deg;
   state.maxDegree = maxDeg;
+  state.adj = adj;
+  state.perDirPool = Array.from({ length: dirs.length }, () => []);
+  state.listPool = [];
 
   const agg = new Map();
   for (const [s, t] of edges) {
@@ -130,11 +140,7 @@ function buildGraph() {
     return { s: a, t: b, w };
   });
 
-  // 度降序节点序列（高保真限流：优先画高影响力节点）
-  state.degreeOrder = Array.from({ length: n }, (_, i) => i)
-    .sort((a, b) => deg[b] - deg[a]);
-
-  buildHoverGrid();
+  buildHoverGrid();   // 空间索引（桶内已按度降序，替代全局 degreeOrder）
 }
 
 function hslToRgb(h) {
@@ -152,9 +158,11 @@ function hslToRgb(h) {
   return `${Math.round((r + m) * 255)},${Math.round((g + m) * 255)},${Math.round((b + m) * 255)}`;
 }
 
-// hover 空间网格：cell -> [节点索引]，hover 只查指针附近 3×3 格
+// hover 空间网格：cell -> [节点索引]，hover 只查指针附近 3×3 格。
+// 桶内按度降序 → drawCrispNodes 用同一索引做视口裁剪时优先画高影响力节点。
 function buildHoverGrid() {
   const xs = state.data.nodes.x, ys = state.data.nodes.y;
+  const deg = state.degrees;
   const grid = new Map();
   for (let i = 0; i < xs.length; i++) {
     const cx = Math.floor(xs[i] / GRID_CELL), cy = Math.floor(ys[i] / GRID_CELL);
@@ -163,6 +171,7 @@ function buildHoverGrid() {
     if (!b) { b = []; grid.set(k, b); }
     b.push(i);
   }
+  for (const b of grid.values()) b.sort((a, z) => deg[z] - deg[a]);
   state.hoverGrid = grid;
 }
 
@@ -218,21 +227,13 @@ function fitView(dur = 500) {
   animateTransformTo(zoomIdentity.translate(innerWidth / 2 - cx * k, innerHeight / 2 - cy * k).scale(k), dur);
 }
 
-// 模式切换：整体模式（学科聚合）↔ 网络模式（声明网络）
+// 模式切换：整体模式（学科聚合）↔ 网络模式（声明网络）。只切渲染内容，不动视图。
 function switchMode(mode) {
   if (state.mode === mode) return;
   state.mode = mode;
   state.hover = -1;
   $('btnOverview').classList.toggle('active', mode === 'overview');
   $('btnNetwork').classList.toggle('active', mode === 'network');
-  if (mode === 'overview') {
-    fitView(500);                                  // 整体模式 → 缩到整图
-  } else {
-    const c = state.transform;
-    const cx = (innerWidth / 2 - c.x) / c.k, cy = (innerHeight / 2 - c.y) / c.k;
-    const k = Math.max(c.k, 4);                    // 网络模式 → 放大到节点清晰可见
-    animateTransformTo(zoomIdentity.translate(innerWidth / 2 - cx * k, innerHeight / 2 - cy * k).scale(k), 500);
-  }
   requestRender();
 }
 
@@ -248,7 +249,7 @@ function setupUI() {
   };
   $('search').addEventListener('input', (e) => onSearch(e.target.value));
   canvas.addEventListener('mousemove', onMouseMove);
-  canvas.addEventListener('mouseleave', () => { state.hover = -1; requestRender(); });
+  canvas.addEventListener('mouseleave', () => { state.hover = -1; $('hoverInfo').textContent = ''; requestRender(); });
 }
 
 function onSearch(q) {
@@ -338,8 +339,6 @@ function render() {
   ctx.restore();
 
   drawAxes(k);
-  $('zoomK').textContent = k.toFixed(2) + '×';
-  $('lodLabel').textContent = aggregate ? '整体模式 · 学科聚合' : '网络模式 · 声明网络';
   $('nodeCount').textContent = state.data.meta.conceptCount.toLocaleString();
   $('edgeCount').textContent = state.data.meta.edgeCount.toLocaleString();
 }
@@ -382,43 +381,64 @@ function drawCrisp(vLeft, vRight, vTop, vBottom, k) {
   if (k >= LABEL_K) drawCrispLabels(k);
 }
 
-// 默认依赖边（灰/白细线，视口裁剪后数量有限）
+// 默认依赖边（灰/白细线，视口裁剪 + 数量上限）
 function drawEdgesLive(vLeft, vRight, vTop, vBottom, k) {
   const xs = state.data.nodes.x, ys = state.data.nodes.y;
   const m = CULL_MARGIN / k;
   const sLeft = vLeft - m, sRight = vRight + m, sTop = vTop - m, sBot = vBottom + m;
   ctx.beginPath();
+  let cnt = 0;
   for (const [s, t] of state.data.edges) {
     const x1 = xs[s], y1 = ys[s], x2 = xs[t], y2 = ys[t];
     if ((x1 < sLeft && x2 < sLeft) || (x1 > sRight && x2 > sRight) || (y1 < sTop && y2 < sTop) || (y1 > sBot && y2 > sBot)) continue;
     ctx.moveTo(x1, y1); ctx.lineTo(x2, y2);
+    if (++cnt >= MAX_EDGES) break;
   }
   ctx.strokeStyle = `rgba(${EDGE_COLOR},${EDGE_ALPHA})`;
   ctx.lineWidth = 1 / k;
   ctx.stroke();
 }
 
-// 高保真节点：按度降序扫描，屏幕网格每格只留 1 个 → 每帧 ≤ 屏幕格子数，绝不超量。
+// 高保真节点：遍历视口覆盖的世界格（空间索引），每格只留 1 个节点 →
+// 每帧只处理视口内节点（几万），不再全量扫 15 万；屏幕格位图去重（复用，无 GC）。
 function drawCrispNodes(k) {
   const { nodes, dirs } = state.data;
   const xs = nodes.x, ys = nodes.y;
   const { x, y } = state.transform;
-  const used = new Map();                 // 屏幕格 -> 已占
-  const perDir = dirs.map(() => []);
-  const list = [];
+  const cols = Math.ceil(innerWidth / SCREEN_CELL);
+  const rows = Math.ceil(innerHeight / SCREEN_CELL);
+  const need = cols * rows;
+  if (state.visited.length < need) state.visited = new Uint8Array(need);
+  const visited = state.visited;
+  visited.fill(0, 0, need);
+  const perDir = state.perDirPool;
+  for (let di = 0; di < dirs.length; di++) perDir[di].length = 0;
+  const list = state.listPool;
+  list.length = 0;
   let drawn = 0;
-  const cellCap = Math.min(MAX_DRAWN, Math.ceil(innerWidth / SCREEN_CELL) * Math.ceil(innerHeight / SCREEN_CELL));
+  const cellCap = Math.min(MAX_DRAWN, need);
 
-  for (const i of state.degreeOrder) {
-    const sx = xs[i] * k + x, sy = ys[i] * k + y;
-    if (sx < -8 || sx > innerWidth + 8 || sy < -8 || sy > innerHeight + 8) continue;
-    const gx = (sx / SCREEN_CELL) | 0, gy = (sy / SCREEN_CELL) | 0;
-    const key = gx + ',' + gy;
-    if (used.has(key)) continue;
-    used.set(key, true);
-    perDir[state.nodeDirIdx[i]].push(i);
-    list.push(i);
-    if (++drawn >= cellCap) break;   // 每格最多 1 个 → 满格即停，无需扫完 15 万
+  // 视口覆盖的世界格范围（hoverGrid 空间索引）
+  const gx0 = Math.floor(-x / k / GRID_CELL), gx1 = Math.floor((innerWidth - x) / k / GRID_CELL);
+  const gy0 = Math.floor(-y / k / GRID_CELL), gy1 = Math.floor((innerHeight - y) / k / GRID_CELL);
+
+  outer:
+  for (let gy = gy0; gy <= gy1; gy++) {
+    for (let gx = gx0; gx <= gx1; gx++) {
+      const bucket = state.hoverGrid.get(gx + ',' + gy);
+      if (!bucket) continue;
+      for (const i of bucket) {
+        const sx = xs[i] * k + x, sy = ys[i] * k + y;
+        if (sx < 0 || sx >= innerWidth || sy < 0 || sy >= innerHeight) continue;
+        const sgx = (sx / SCREEN_CELL) | 0, sgy = (sy / SCREEN_CELL) | 0;
+        const key = sgy * cols + sgx;
+        if (visited[key]) continue;
+        visited[key] = 1;
+        perDir[state.nodeDirIdx[i]].push(i);
+        list.push(i);
+        if (++drawn >= cellCap) break outer;
+      }
+    }
   }
 
   // 悬停节点强制入列，保证可见
@@ -427,7 +447,7 @@ function drawCrispNodes(k) {
     list.push(state.hover);
   }
 
-  const baseR = NODE_R_SCREEN / k;
+  const baseR = nodeR(k);
   const sqrtMax = Math.sqrt(state.maxDegree);
   for (let di = 0; di < dirs.length; di++) {
     if (state.hiddenDirs.has(dirs[di].name)) continue;
@@ -437,8 +457,8 @@ function drawCrispNodes(k) {
     ctx.beginPath();
     for (const i of arr) {
       const r = baseR * (0.6 + 1.4 * Math.sqrt(state.degrees[i]) / sqrtMax);
-      const px = xs[i], py = ys[i];   // 世界坐标（ctx 已处于世界空间）
-      ctx.rect(px - r, py - r, r * 2, r * 2);
+      ctx.moveTo(xs[i] + r, ys[i]);                   // 圆（无方角），moveTo 避免 arc 间连线
+      ctx.arc(xs[i], ys[i], r, 0, Math.PI * 2);
     }
     ctx.fill();
   }
@@ -448,7 +468,7 @@ function drawCrispNodes(k) {
 // 声明名标签（限 MAX_LABELS 个，避免遮挡）
 function drawCrispLabels(k) {
   const { nodes } = state.data;
-  const baseR = NODE_R_SCREEN / k;
+  const baseR = nodeR(k);
   ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
   ctx.font = `${10 / k}px "Segoe UI","Microsoft YaHei",sans-serif`;
   ctx.fillStyle = 'rgba(230,237,243,0.75)';
@@ -506,14 +526,10 @@ function drawHover(k) {
   const dirA = n.dir[i];
   const colorA = state.dirColor.get(dirA);
 
-  // 收集 1 跳邻居（去重）
-  const neigh = [];
-  for (const [s, t] of state.data.edges) {
-    if (s === i) { if (!neigh.includes(t)) neigh.push(t); }
-    else if (t === i) { if (!neigh.includes(s)) neigh.push(s); }
-  }
+  // 收集 1 跳邻居（邻接表 O(deg)，不再全量扫边）
+  const neigh = state.adj[i] || [];
 
-  const baseR = NODE_R_SCREEN / k;
+  const baseR = nodeR(k);
 
   // 1) 关联连线（发光）
   for (const j of neigh) {

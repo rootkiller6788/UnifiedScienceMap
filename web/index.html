@@ -18,16 +18,13 @@
     #graph:active { cursor: grabbing; }
 
     .panel { position: fixed; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 10px 14px; backdrop-filter: blur(6px); font-size: 12.5px; line-height: 1.6; }
-    #title { top: 14px; left: 14px; max-width: 300px; }
-    #title h1 { font-size: 15px; margin-bottom: 2px; }
-    #title p { color: var(--muted); font-size: 11.5px; }
-    #status { top: 14px; right: 14px; text-align: right; min-width: 150px; }
-    #status b { color: #79c0ff; }
-    #hud { bottom: 62px; left: 14px; display: flex; gap: 14px; align-items: flex-start; transition: opacity 0.15s; }
+    #hud { bottom: 62px; left: 14px; display: flex; flex-direction: column; gap: 6px; transition: opacity 0.15s; }
     #hud.collapsed { display: none; }
+    #hud .hud-row { display: flex; gap: 14px; align-items: flex-start; }
     #hud .gauge { display: flex; flex-direction: column; align-items: flex-start; }
     #hud .gauge b { font-size: 13px; }
     #hud .gauge span { color: var(--muted); font-size: 11px; }
+    #hoverInfo { color: var(--muted); font-size: 11px; max-width: 340px; border-bottom: 1px solid var(--border); padding-bottom: 6px; margin-bottom: 4px; min-height: 18px; }
     #legend { max-height: 46vh; overflow-y: auto; min-width: 170px; }
     #legend .sw { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 8px; vertical-align: middle; }
     #legend .item { cursor: pointer; padding: 2px 4px; border-radius: 4px; }
@@ -46,7 +43,7 @@
     #zoombar button { width: 32px; height: 32px; font-size: 20px; line-height: 1; background: rgba(120,140,170,0.15); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; cursor: pointer; }
     #zoombar button:hover { background: rgba(120,140,170,0.3); }
 
-    #searchbox { top: 60px; right: 14px; width: 220px; }
+    #searchbox { top: 14px; right: 14px; width: 220px; }
     #searchbox input { width: 100%; background: rgba(0,0,0,0.35); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 7px 10px; font-size: 12.5px; outline: none; }
     #searchbox input:focus { border-color: #58a6ff; }
     #searchbox .hint { color: var(--muted); font-size: 11px; margin-top: 5px; }
@@ -64,26 +61,18 @@
 <body>
   <canvas id="graph"></canvas>
 
-  <div id="title" class="panel">
-    <h1>🧮 数学声明历史地图</h1>
-    <p>横轴=学科簇(按首次进库时间排) · 纵轴=结构深度 · 16:9 科研绘图</p>
-    <p>滚轮缩放 · 拖拽平移 · 悬停看声明 · 放大看标签</p>
-  </div>
-
-  <div id="status" class="panel">
-    <div>缩放 <b id="zoomK">1.0×</b> · <span id="lodLabel">三层抽象</span></div>
-    <div id="hoverInfo" style="color:var(--muted); font-size:11px;"></div>
-  </div>
-
   <div id="searchbox" class="panel">
     <input id="search" type="text" placeholder="搜索声明，如 kernel / Cauchy / group…" />
     <div class="hint" id="searchHint"></div>
   </div>
 
   <div id="hud" class="panel">
-    <div class="gauge"><b id="nodeCount">–</b><span>声明总数</span></div>
-    <div class="gauge"><b id="edgeCount">–</b><span>依赖连线</span></div>
-    <div id="legend"></div>
+    <div id="hoverInfo"></div>
+    <div class="hud-row">
+      <div class="gauge"><b id="nodeCount">–</b><span>声明总数</span></div>
+      <div class="gauge"><b id="edgeCount">–</b><span>依赖连线</span></div>
+      <div id="legend"></div>
+    </div>
   </div>
 
   <div id="toolbar" class="panel">
