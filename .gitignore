@@ -17,3 +17,6 @@ scripts/.rm_set_option_progress.jsonl
 # Node.js (力导向图 demo 可能用到)
 node_modules/
 package-lock.json
+
+# 生成的声明地图数据（18MB，勿提交；本地运行 extract/extract-decls.mjs 生成）
+/web/decls.json
