@@ -125,8 +125,13 @@ function resize() {
   canvas.style.width = innerWidth + 'px';
   canvas.style.height = innerHeight + 'px';
   // 最远视图＝整图铺满屏，是缩放下限，不能再缩小
-  state.fitK = Math.min((innerWidth - 80) / WORLD_W, (innerHeight - 60) / WORLD_H);
-  zoomBehavior.scaleExtent([state.fitK, 40]);
+  updateFitK();
+  if (state.mode === 'overview' && state.data) {
+    state.transform = fitTransformForCurrentWorld();
+    syncD3();
+    requestRender();
+    return;
+  }
   if (state.transform.k < state.fitK) {
     state.transform.k = state.fitK;
     syncD3();
@@ -296,7 +301,7 @@ function buildHoverGrid() {
 }
 
 // ---- 缩放/平移 ----
-const zoomBehavior = zoom().scaleExtent([0.25, 40]).on('zoom', (ev) => {
+const zoomBehavior = zoom().scaleExtent([0.25, 120]).on('zoom', (ev) => {
   const t = ev.transform;
   // 永远不能缩到最远视图以下（硬下限，双保险）
   if (t.k < state.fitK) t.k = state.fitK;
@@ -305,8 +310,9 @@ const zoomBehavior = zoom().scaleExtent([0.25, 40]).on('zoom', (ev) => {
 });
 function setupZoom() {
   const sel = select(canvas);
-  // 最远视图锁定平移：在 fitK（最远视图）时禁止鼠标拖拽/单指拖动，放大后才可拖
+  // 整体模式是静态总览；网络模式才允许缩放/拖拽。
   zoomBehavior.filter((ev) => {
+    if (state.mode === 'overview') return false;
     if (ev.type === 'mousedown') return state.transform.k > state.fitK + 1e-3;
     if (ev.type === 'touchstart' && (!ev.touches || ev.touches.length === 1)) {
       return state.transform.k > state.fitK + 1e-3;
@@ -314,14 +320,19 @@ function setupZoom() {
     return true; // 滚轮缩放等始终允许
   });
   sel.call(zoomBehavior);
+  updateCanvasCursor();
   zoomBehavior.on('start', () => { canvas.style.cursor = 'grabbing'; });
-  zoomBehavior.on('end', () => { canvas.style.cursor = 'grab'; });
+  zoomBehavior.on('end', updateCanvasCursor);
+}
+
+function updateCanvasCursor() {
+  canvas.style.cursor = state.mode === 'overview' ? 'default' : 'grab';
 }
 
 // 让 d3-zoom 内部状态与 state.transform 同步，防止程序化改视图后下次交互跳变/突破下限
 function syncD3() {
   const t = state.transform;
-  select(canvas).call(zoomBehavior.transform, zoomIdentity.translate(t.x, t.y).scale(t.k));
+  select(canvas).property('__zoom', zoomIdentity.translate(t.x, t.y).scale(t.k));
 }
 
 let tweenRAF = 0;
@@ -387,14 +398,21 @@ function fitView(dur = 500) {
   animateTransformTo(fitTransformForCurrentWorld(), dur);
 }
 
-// 模式切换：整体模式（学科聚合）↔ 网络模式（声明网络）。只切渲染内容，不动视图。
+// 模式切换：整体模式（学科聚合）↔ 网络模式（声明网络）。只切渲染内容，不动视图（不自动缩放）。
+// 网络模式轴向范围不同，故切换后重算缩放下限；若当前缩放低于新下限则抬到下限（仅保下限，非"缩放到适配"）。
 function switchMode(mode) {
   if (state.mode === mode) return;
   state.mode = mode;
   state.hover = -1;
   $('btnOverview').classList.toggle('active', mode === 'overview');
   $('btnNetwork').classList.toggle('active', mode === 'network');
-  requestRender();
+  updateFitK();
+  updateCanvasCursor();
+  if (mode === 'overview') {
+    fitView(350);
+    return;
+  }
+  fitView(350);
 }
 
 // ---- UI ----
