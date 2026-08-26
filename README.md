@@ -1,168 +1,206 @@
-# mathlib4
+# UnifiedScienceMap
 
-![GitHub CI](https://github.com/leanprover-community/mathlib4/actions/workflows/build.yml/badge.svg?branch=master)
-[![Bors enabled](https://raw.githubusercontent.com/bors-ng/bors-ng.github.io/refs/heads/master/images/badge_small.svg)](https://mathlib-bors-ca18eefec4cb.herokuapp.com/repositories/16)
-[![project chat](https://img.shields.io/badge/zulip-join_chat-brightgreen.svg)](https://leanprover.zulipchat.com)
-[![Gitpod Ready-to-Code](https://img.shields.io/badge/Gitpod-ready--to--code-blue?logo=gitpod)](https://gitpod.io/#https://github.com/leanprover-community/mathlib4)
+UnifiedScienceMap is an interactive map of formalized scientific knowledge. It merges Lean-based mathematics, physics, computer science, and scientific computing libraries into one explorable system map instead of showing each repository as a separate island.
 
-[Mathlib](https://leanprover-community.github.io) is a user maintained library for the [Lean theorem prover](https://leanprover.github.io).
-It contains both programming infrastructure and mathematics,
-as well as tactics that use the former and allow to develop the latter.
+The project is currently focused on a browser visualization with two main views:
 
-## Installation
+- `Overview`: a high-level subject map for seeing the shape of the knowledge base.
+- `Network`: a large-scale WebGL graph for exploring declarations, dependencies, labels, and local relationship chains.
 
-You can find detailed instructions to install Lean, mathlib, and supporting tools on [our website](https://leanprover-community.github.io/get_started.html).
-Alternatively, click on one of the buttons below to open a GitHub Codespace or a Gitpod workspace containing the project.
+The goal is to make a "system science map": math, physics, computation, scientific computing, and later control theory or research metadata should live in the same coordinate system, with repository identity kept as metadata rather than as the visible organizing principle.
 
-[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/leanprover-community/mathlib4)
+## Data Sources
 
-[![Open in Gitpod](https://gitpod.io/button/open-in-gitpod.svg)](https://gitpod.io/#https://github.com/leanprover-community/mathlib4)
+The current unified dataset is built from:
 
-## Using `mathlib4` as a dependency
+- `mathlib`: the core mathematical library for Lean 4.
+- `physlib`: formalized physics and quantum information material.
+- `cslib`: formalized computer science material.
+- `SciLean`: scientific computing, analysis, automatic differentiation, numerics, and related modules.
 
-Please refer to
-[https://github.com/leanprover-community/mathlib4/wiki/Using-mathlib4-as-a-dependency](https://github.com/leanprover-community/mathlib4/wiki/Using-mathlib4-as-a-dependency)
+External source repositories are preserved under `external/` so their Git history and author metadata remain part of this repository after merge:
 
-## Experimenting
-
-Got everything installed? Why not start with the [tutorial project](https://leanprover-community.github.io/install/project.html)?
-
-For more pointers, see [Learning Lean](https://leanprover-community.github.io/learn.html).
-
-## Documentation
-
-Besides the installation guides above and [Lean's general
-documentation](https://docs.lean-lang.org/lean4/doc/), the documentation
-of mathlib consists of:
-
-- [The mathlib4 docs](https://leanprover-community.github.io/mathlib4_docs/index.html): documentation [generated
-  automatically](https://github.com/leanprover/doc-gen4) from the source `.lean` files.
-- A description of [currently covered theories](https://leanprover-community.github.io/theories.html),
-  as well as an [overview](https://leanprover-community.github.io/mathlib-overview.html) for mathematicians.
-- Some [extra Lean documentation](https://leanprover-community.github.io/learn.html) not specific to mathlib (see "Miscellaneous topics")
-- Documentation for people who would like to [contribute to mathlib](https://leanprover-community.github.io/contribute/index.html)
-
-Much of the discussion surrounding mathlib occurs in a [Zulip chat
-room](https://leanprover.zulipchat.com/), and you are welcome to join, or read
-along without signing up.  Questions from users at all levels of expertise are
-welcome!  We also provide an [archive of the public
-discussions](https://leanprover-community.github.io/archive/), which is useful
-for quick reference.
-
-## Contributing
-
-The complete documentation for contributing to ``mathlib`` is located
-[on the community guide contribute to mathlib](https://leanprover-community.github.io/contribute/index.html)
-
-You may want to subscribe to the `mathlib4` channel on [Zulip](https://leanprover.zulipchat.com/) to introduce yourself and your plan to the community.
-Often you can find community members willing to help you get started and advise you on the fit and
-feasibility of your project.
-
-* To obtain precompiled `olean` files, run `lake exe cache get`. (Skipping this step means the next step will be very slow.)
-* To build `mathlib4` run `lake build`.
-* To build and run all tests, run `lake test`.
-* You can use `lake build Mathlib.Import.Path` to build a particular file, e.g. `lake build Mathlib.Algebra.Group.Defs`.
-* If you added a new file, run the following command to update `Mathlib.lean`
-
-  ```shell
-  lake exe mk_all
-  ```
-
-### Guidelines
-
-Mathlib has the following guidelines and conventions that must be followed
-
- - The [style guide](https://leanprover-community.github.io/contribute/style.html)
- - A guide on the [naming convention](https://leanprover-community.github.io/contribute/naming.html)
- - The [documentation style](https://leanprover-community.github.io/contribute/doc.html)
-
-### Downloading cached build files
-
-You can run `lake exe cache get` to download cached build files that are computed by `mathlib4`'s automated workflow.
-
-If something goes mysteriously wrong,
-you can try one of `lake clean` or `rm -rf .lake` before trying `lake exe cache get` again.
-In some circumstances you might try `lake exe cache get!`
-which re-downloads cached build files even if they are available locally.
-
-Call `lake exe cache` to see its help menu.
-
-### Building HTML documentation
-
-The [mathlib4_docs repository](https://github.com/leanprover-community/mathlib4_docs)
-is responsible for generating and publishing the
-[mathlib4 docs](https://leanprover-community.github.io/mathlib4_docs/index.html).
-
-That repo can be used to build the docs locally:
-```shell
-git clone https://github.com/leanprover-community/mathlib4_docs.git
-cd mathlib4_docs
-cp ../mathlib4/lean-toolchain .
-lake exe cache get
-lake build Mathlib:docs
+```text
+external/
+  SciLean/
+  cslib/
+  physlib/
 ```
-The last step may take a while (>20 minutes).
-The HTML files can then be found in `.lake/build/doc`.
 
-## Transitioning from Lean 3
+This is intentional: GitHub can attribute imported commits to their original authors when the commits are part of the repository history.
 
-For users familiar with Lean 3 who want to get up to speed in Lean 4 and migrate their existing
-Lean 3 code we have:
+## Current Dataset
 
-- A [survival guide](https://github.com/leanprover-community/mathlib4/wiki/Lean-4-survival-guide-for-Lean-3-users)
-  for Lean 3 users
-- [Instructions to run `mathport`](https://github.com/leanprover-community/mathport#running-on-a-project-other-than-mathlib)
-  on a project other than mathlib. `mathport` is the tool the community used to port the entirety
-  of `mathlib` from Lean 3 to Lean 4.
+The main browser dataset is:
 
-### Dependencies
+```text
+web/unified-decls.json
+```
 
-If you are a mathlib contributor and want to update dependencies, use `lake update`,
-or `lake update batteries aesop` (or similar) to update a subset of the dependencies.
-This will update the `lake-manifest.json` file correctly.
-You will need to make a PR after committing the changes to this file.
+It is generated from the individual declaration datasets and module-level Git history files. The current unified map is approximately:
 
-Please do not run `lake update -Kdoc=on` as previously advised, as the documentation related
-dependencies should only be included when CI is building documentation.
+- 170k declaration nodes
+- 40k graph edges
+- 50+ subject clusters
+- math, physics, computer science, and scientific computing sources
 
-## Maintainers:
+Each node follows a shared schema:
 
-For a list containing more detailed information, see https://leanprover-community.github.io/teams/maintainers.html
+```json
+{
+  "label": "LinearMap.ker",
+  "kind": "def",
+  "dir": "LinearAlgebra",
+  "module": "Mathlib.LinearAlgebra.Basic",
+  "depth": 3,
+  "x": 0.42,
+  "y": -0.15,
+  "year": 2024.2,
+  "sourceRepo": "mathlib",
+  "sourcePackage": "Mathlib",
+  "domain": "Math",
+  "subject": "LinearAlgebra",
+  "createdAt": "2023-08-10T12:34:56Z",
+  "lastTouchedAt": "2026-01-20T08:15:00Z",
+  "commitCount": 12,
+  "firstAuthor": "Example Author",
+  "contributors": ["Example Author", "Another Contributor"]
+}
+```
 
-* Anne Baanen (@Vierkantor): algebra, number theory, tactics
-* Matthew Robert Ballard (@mattrobball): algebra, algebraic geometry, category theory
-* Riccardo Brasca (@riccardobrasca): algebra, number theory, algebraic geometry, category theory
-* Kevin Buzzard (@kbuzzard): algebra, number theory, algebraic geometry, category theory
-* Mario Carneiro (@digama0): lean formalization, tactics, type theory, proof engineering
-* Bryan Gin-ge Chen (@bryangingechen): documentation, infrastructure
-* Johan Commelin (@jcommelin): algebra, number theory, category theory, algebraic geometry
-* Anatole Dedecker (@ADedecker): topology, functional analysis, calculus
-* Rémy Degenne (@RemyDegenne): probability, measure theory, analysis
-* Floris van Doorn (@fpvandoorn): measure theory, model theory, tactics
-* Frédéric Dupuis (@dupuisf): linear algebra, functional analysis
-* Sébastien Gouëzel (@sgouezel): topology, calculus, geometry, analysis, measure theory
-* Markus Himmel (@TwoFX): category theory
-* Yury G. Kudryashov (@urkud): analysis, topology, measure theory
-* Robert Y. Lewis (@robertylewis): tactics, documentation
-* Jireh Loreaux (@j-loreaux): analysis, topology, operator algebras
-* Heather Macbeth (@hrmacbeth): geometry, analysis
-* Patrick Massot (@patrickmassot): documentation, topology, geometry
-* Bhavik Mehta (@b-mehta): category theory, combinatorics
-* Kyle Miller (@kmill): combinatorics, tactics, metaprogramming
-* Kim Morrison (@kim-em): category theory, tactics
-* Oliver Nash (@ocfnash): algebra, geometry, topology
-* Filippo A. E. Nuccio (@faenuccio): algebra, functional analysis, homology, number theory
-* Joël Riou (@joelriou): category theory, homology, algebraic geometry
-* Michael Rothgang (@grunweg): differential geometry, analysis, topology, linters
-* Damiano Testa (@adomani): algebra, algebraic geometry, number theory, tactics, linters
-* Adam Topaz (@adamtopaz): algebra, category theory, algebraic geometry
-* Eric Wieser (@eric-wieser): algebra, infrastructure
+The frontend uses this metadata for search and local inspection, but contributor/history data is not shown as a separate visual layer by default.
 
-## Past maintainers:
+## Visualization Architecture
 
-* Jeremy Avigad (@avigad): analysis
-* Reid Barton (@rwbarton): category theory, topology
-* Gabriel Ebner (@gebner): tactics, infrastructure, core, formal languages
-* Johannes Hölzl (@johoelzl): measure theory, topology
-* Simon Hudon (@cipher1024): tactics
-* Chris Hughes (@ChrisHughes24): algebra
+The visualization is split across three layers:
+
+- WebGL renders the large node cloud.
+- WebGL renders default edges underneath nodes.
+- Canvas 2D renders labels, axes, HUD text, hover details, and hover relationship chains.
+
+The Network view is designed for very large data. Default edges start nearly invisible and become clearer as the user zooms in, while hover relationship chains remain explicit and readable.
+
+Key files:
+
+```text
+web/index.html
+web/main.js
+web/gl-renderer.js
+web/wasm-index.js
+web/spatial-index.wasm
+web/unified-decls.json
+```
+
+## Build Pipeline
+
+The project keeps raw per-source declaration files and builds one unified dataset for the frontend.
+
+Input declaration datasets:
+
+```text
+web/decls.json
+web/physlib-decls.json
+web/cslib-decls.json
+web/scilean-decls.json
+```
+
+Git history datasets:
+
+```text
+web/mathlib-history.json
+web/physlib-history.json
+web/cslib-history.json
+web/scilean-history.json
+```
+
+Build scripts:
+
+```text
+scripts/build-addon-decls.mjs
+scripts/build-physlib-decls.mjs
+scripts/build-history.mjs
+scripts/build-unified-decls.mjs
+```
+
+Regenerate addon declaration datasets:
+
+```powershell
+node scripts/build-addon-decls.mjs physlib
+node scripts/build-addon-decls.mjs cslib
+node scripts/build-addon-decls.mjs scilean
+```
+
+Regenerate module-level Git history:
+
+```powershell
+node scripts/build-history.mjs mathlib
+node scripts/build-history.mjs physlib
+node scripts/build-history.mjs cslib
+node scripts/build-history.mjs scilean
+```
+
+Build the final unified map:
+
+```powershell
+node scripts/build-unified-decls.mjs
+```
+
+## Local Development
+
+Serve the static web app from the repository root:
+
+```powershell
+python -m http.server 8756 --directory web
+```
+
+Then open:
+
+```text
+http://localhost:8756/
+```
+
+No bundler is required for the current static app.
+
+## Repository Layout
+
+```text
+web/
+  index.html              Browser UI
+  main.js                 App state, interaction, labels, Canvas overlays
+  gl-renderer.js          WebGL renderer for nodes and default edges
+  unified-decls.json      Main generated map data
+  *-decls.json            Per-source declaration datasets
+  *-history.json          Module-level Git history metadata
+
+scripts/
+  build-addon-decls.mjs   Shared extractor for addon Lean repositories
+  build-history.mjs       Module-level Git history extractor
+  build-unified-decls.mjs Unified dataset builder
+
+external/
+  SciLean/                Imported source tree with history
+  cslib/                  Imported source tree with history
+  physlib/                Imported source tree with history
+```
+
+## Design Direction
+
+UnifiedScienceMap should stay visually centered on the map itself:
+
+- The visible map is organized by subject and knowledge relationships.
+- Repositories are metadata, not continents.
+- Contribution history supports GitHub attribution and future detail panels, but it should not dominate the main view.
+- New sources should be merged into the same schema before they are visualized.
+
+The preferred growth path is to add more formal science libraries, keep the extractor consistent, and improve the mixed layout so related ideas naturally sit near each other across math, physics, computation, and scientific computing.
+
+## Attribution
+
+This project builds on public Lean ecosystem work, including:
+
+- [mathlib4](https://github.com/leanprover-community/mathlib4)
+- [SciLean](https://github.com/lecopivo/SciLean)
+- [cslib](https://github.com/leanprover/cslib)
+- the imported `physlib` source tree in this repository
+
+Original commits imported into `external/` retain their historical authorship in Git.
