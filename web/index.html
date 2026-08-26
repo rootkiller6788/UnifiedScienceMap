@@ -1,23 +1,25 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>数学概念历史地图 · mathlib4</title>
+  <title>Mathlib Knowledge Map</title>
   <style>
     :root {
-      --bg: #0d1117;
-      --panel: rgba(22, 27, 34, 0.88);
-      --border: rgba(255, 255, 255, 0.12);
+      --bg: #000;
+      --panel: rgba(8, 10, 13, 0.62);
+      --border: rgba(255, 255, 255, 0.1);
       --fg: #e6edf3;
       --muted: #8b949e;
     }
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { width: 100%; height: 100%; overflow: hidden; background: var(--bg); color: var(--fg); font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
-    #graph { display: block; width: 100%; height: 100%; cursor: grab; }
+    #glgraph, #graph { position: fixed; inset: 0; display: block; width: 100%; height: 100%; }
+    #glgraph { z-index: 0; pointer-events: none; }
+    #graph { z-index: 1; cursor: grab; }
     #graph:active { cursor: grabbing; }
 
-    .panel { position: fixed; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 10px 14px; backdrop-filter: blur(6px); font-size: 12.5px; line-height: 1.6; }
+    .panel { position: fixed; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; backdrop-filter: blur(10px); box-shadow: 0 14px 42px rgba(0,0,0,0.42); font-size: 12.5px; line-height: 1.6; }
     #hud { bottom: 62px; left: 14px; display: flex; flex-direction: column; gap: 6px; transition: opacity 0.15s; }
     #hud.collapsed { display: none; }
     #hud .hud-row { display: flex; gap: 14px; align-items: flex-start; }
@@ -34,14 +36,14 @@
     #legend .row { display: flex; align-items: center; justify-content: space-between; }
 
     #toolbar { bottom: 14px; right: 14px; display: flex; gap: 8px; }
-    #toolbar button { background: rgba(120,140,170,0.15); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 6px 12px; cursor: pointer; font-size: 12px; }
-    #toolbar button:hover { background: rgba(120,140,170,0.3); }
-    #toolbar button.active { background: #58a6ff; border-color: #58a6ff; color: #0d1117; font-weight: 600; }
+    #toolbar button { background: rgba(255,255,255,0.06); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 6px 12px; cursor: pointer; font-size: 12px; }
+    #toolbar button:hover { background: rgba(255,255,255,0.12); }
+    #toolbar button.active { background: rgba(255,255,255,0.86); border-color: rgba(255,255,255,0.92); color: #030303; font-weight: 600; }
     #toolbar .sep { width: 1px; background: var(--border); margin: 2px 0; }
 
     #zoombar { bottom: 14px; left: 14px; padding: 4px; }
-    #zoombar button { width: 32px; height: 32px; font-size: 20px; line-height: 1; background: rgba(120,140,170,0.15); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; cursor: pointer; }
-    #zoombar button:hover { background: rgba(120,140,170,0.3); }
+    #zoombar button { width: 32px; height: 32px; font-size: 20px; line-height: 1; background: rgba(255,255,255,0.06); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; cursor: pointer; }
+    #zoombar button:hover { background: rgba(255,255,255,0.12); }
 
     #searchbox { top: 14px; right: 14px; width: 220px; }
     #searchbox input { width: 100%; background: rgba(0,0,0,0.35); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 7px 10px; font-size: 12.5px; outline: none; }
@@ -59,36 +61,37 @@
   </style>
 </head>
 <body>
+  <canvas id="glgraph"></canvas>
   <canvas id="graph"></canvas>
 
   <div id="searchbox" class="panel">
-    <input id="search" type="text" placeholder="搜索声明，如 kernel / Cauchy / group…" />
+    <input id="search" type="text" placeholder="Search declarations, e.g. kernel / Cauchy / group..." />
     <div class="hint" id="searchHint"></div>
   </div>
 
   <div id="hud" class="panel">
     <div id="hoverInfo"></div>
     <div class="hud-row">
-      <div class="gauge"><b id="nodeCount">–</b><span>声明总数</span></div>
-      <div class="gauge"><b id="edgeCount">–</b><span>依赖连线</span></div>
+      <div class="gauge"><b id="nodeCount">-</b><span>Declarations</span></div>
+      <div class="gauge"><b id="edgeCount">-</b><span>Dependency Links</span></div>
       <div id="legend"></div>
     </div>
   </div>
 
   <div id="toolbar" class="panel">
-    <button id="btnOverview" class="active">🌐 整体模式</button>
-    <button id="btnNetwork">🔗 网络模式</button>
+    <button id="btnOverview" class="active">Overview</button>
+    <button id="btnNetwork">Network</button>
     <span class="sep"></span>
-    <button id="btnFit">⤢ 重置视图</button>
+    <button id="btnFit">Fit View</button>
   </div>
 
   <div id="zoombar" class="panel">
-    <button id="btnHudToggle" title="收起图例面板">−</button>
+    <button id="btnHudToggle" title="Hide legend">-</button>
   </div>
 
   <div id="loading">
     <div class="spinner"></div>
-    <p id="loadingText">加载声明地图数据（15.3 万节点，约 17.7 MB）…</p>
+    <p id="loadingText">Loading declaration map data (153k nodes, about 17.7 MB)...</p>
   </div>
 
   <div class="toast" id="toast"></div>
