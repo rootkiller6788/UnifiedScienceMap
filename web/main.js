@@ -1015,17 +1015,42 @@ function drawNetworkDirLabels(k) {
   ctx.restore();
 }
 
-// 声明名标签（限 MAX_LABELS 个，避免遮挡）
+// Declaration labels: visible-area only, ranked and collision-checked.
 function drawCrispLabels(k) {
   const { nodes } = state.data;
   const baseR = nodeR(k);
+  const screenFont = Math.min(13, Math.max(10, 8 + k * 0.18));
+  const worldFont = screenFont / k;
+  const maxLabels = k < 12 ? 36 : Math.min(MAX_LABELS, Math.floor(48 + (k - 12) * 6));
+  const candidates = state.drawnList
+    .slice()
+    .sort((a, b) => state.degrees[b] - state.degrees[a]);
+  const occupied = [];
   ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
-  ctx.font = `${10 / k}px "Segoe UI","Microsoft YaHei",sans-serif`;
-  ctx.fillStyle = 'rgba(230,237,243,0.75)';
-  let n = 0;
-  for (const i of state.drawnList) {
-    if (n++ >= MAX_LABELS) break;
-    ctx.fillText(nodes.label[i], nodes.x[i] + baseR * 1.8, nodes.y[i]);   // 世界坐标
+  ctx.font = `${worldFont}px "Segoe UI", Arial, sans-serif`;
+  let placed = 0;
+  for (const i of candidates) {
+    if (placed >= maxLabels) break;
+    const sx = nodes.x[i] * k + state.transform.x;
+    const sy = nodes.y[i] * k + state.transform.y;
+    if (sx < 24 || sx > innerWidth - 120 || sy < 28 || sy > innerHeight - 30) continue;
+    const label = nodes.label[i];
+    const width = Math.min(260, ctx.measureText(label).width * k);
+    const x = sx + Math.max(5, baseR * k * 1.7);
+    const y = sy;
+    const rect = { x1: x - 3, y1: y - screenFont * 0.72, x2: x + width + 4, y2: y + screenFont * 0.72 };
+    let hit = false;
+    for (const r of occupied) {
+      if (rect.x1 < r.x2 && rect.x2 > r.x1 && rect.y1 < r.y2 && rect.y2 > r.y1) { hit = true; break; }
+    }
+    if (hit) continue;
+    occupied.push(rect);
+    ctx.lineWidth = 3.2 / k;
+    ctx.strokeStyle = 'rgba(0,0,0,0.86)';
+    ctx.strokeText(label, nodes.x[i] + baseR * 1.8, nodes.y[i]);
+    ctx.fillStyle = 'rgba(235,238,245,0.82)';
+    ctx.fillText(label, nodes.x[i] + baseR * 1.8, nodes.y[i]);
+    placed++;
   }
 }
 
