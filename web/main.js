@@ -25,6 +25,34 @@ const MAX_DRAWN = 8000;        // 每帧最多绘制的高保真节点数
 const MAX_LABELS = 220;        // 每帧最多绘制的标签数
 const MAX_EDGES = 6000;        // 每帧最多 stroke 的可见边数（低缩放边太密时降噪+提速）
 
+const DIR_PALETTE = new Map(Object.entries({
+  Algebra: '#ffff00',
+  RingTheory: '#ff8a00',
+  GroupTheory: '#ff1744',
+  Combinatorics: '#ff1744',
+  InformationTheory: '#f8ff45',
+  FieldTheory: '#f8ff45',
+  RepresentationTheory: '#ff8a00',
+  ModelTheory: '#6a5cff',
+  NumberTheory: '#32ff3f',
+  LinearAlgebra: '#25ff45',
+  AlgebraicGeometry: '#9a80ff',
+  Geometry: '#ff65ff',
+  Analysis: '#26fff4',
+  Condensed: '#ff9aa4',
+  MeasureTheory: '#7b28ff',
+  Probability: '#0038ff',
+  Dynamics: '#00b978',
+  Topology: '#ff00f5',
+  AlgebraicTopology: '#c74cff',
+  CategoryTheory: '#8eb2ff',
+  Computability: '#ff7888',
+  SetTheory: '#ff9aa4',
+  Logic: '#1e90ff',
+  Order: '#b05b25',
+  Data: '#9a9a9a',
+}));
+
 // 节点世界半径：屏幕尺寸随缩放温和增长（放大视图节点也变大，而非恒定 2.2px 显得缩小）
 // k=1→2.2px，k=3→3.4px，k=8→5px，k=20→7.3px，k=40→9.7px
 const nodeR = (k) => NODE_R_SCREEN * Math.pow(k, 0.4) / k;
@@ -104,8 +132,13 @@ function buildGraph() {
   for (let i = 0; i < n; i++) state.nodeDirIdx[i] = dirIndex.get(nodes.dir[i]);
 
   dirs.forEach((d, i) => {
-    const h = Math.round((i * 137.5) % 360);
-    state.dirColor.set(d.name, { color: `hsl(${h},72%,58%)`, rgb: hslToRgb(h) });
+    const color = DIR_PALETTE.get(d.name);
+    if (color) {
+      state.dirColor.set(d.name, { color, rgb: hexToRgb(color) });
+    } else {
+      const h = Math.round((i * 137.5) % 360);
+      state.dirColor.set(d.name, { color: `hsl(${h},88%,58%)`, rgb: hslToRgb(h) });
+    }
   });
 
   state.dirMembers = Array.from({ length: dirs.length }, () => []);
@@ -141,6 +174,11 @@ function buildGraph() {
   });
 
   buildHoverGrid();   // 空间索引（桶内已按度降序，替代全局 degreeOrder）
+}
+
+function hexToRgb(hex) {
+  const n = Number.parseInt(hex.slice(1), 16);
+  return `${(n >> 16) & 255},${(n >> 8) & 255},${n & 255}`;
 }
 
 function hslToRgb(h) {
