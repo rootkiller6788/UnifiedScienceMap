@@ -1,0 +1,148 @@
+* First release
+
+ - basic simulations from classical mechanics
+ - basic variational calculus
+
+* Library improvements
+
+** Function predicates and their transitive closure
+   Introduce transitive closure for function predicates like =IsSmooth=, =IsLin= etc. Take inspiration from =CoeT= or =MonadLiftT=, =Coe= itself is user facing typeclass that you provide instance for but when you actually use it you want to infer its transitive closure =CoeT=.
+
+   The advantage is that we will can provide instances that derive =IsSmooth= from =IsLin= that can fail quickly. For example, deriving smoothness of =f ∘ g= you do not want to try composition of smooth function **and** composition of linear functions. You want to apply the composition theorem only once! Deriving smoothness from linearity should work only for atomic functions.
+
+   - pros: =IsSmoothT= will be derivable from =IsLin=. Currently all predicates live in their own world and can't derive each other. This creates lots of repetition.
+   - cons: For new users it might be difficult to understand the difference of =IsSmooth= and =IsSmoothT=. Maybe we can provide a linter for this.
+
+** Generalize and unify =function_argument= notation
+
+   The =function_argument= notation is messy and disorganized. Improve it.
+
+** Autodiff, autoadjoint tactic and let bindings
+
+   Correctly and efficiently differentiate through let bindings. There is already some work on this in =SciLean/Tactic/AutoDiff=
+
+   - focus on differential and adjoint first (worry about adjDiff, fwdDiff, revDiff later)
+   - make it work as a single pass. Differentiation should be done on a single traversal
+   - maybe add an option that checks if differential/adjoint is fully eliminated
+
+** Guard for simp
+
+   I would like to have a guard for certain simp theorems. Currently I use =hold= trick to prevent some simp theorems to apply to theorems to apply to themselves. Alternatively we could say that this simp theorem applies only if a certain functions does not unify to identity. There is also a case for product projections.
+   
+** Set up more robust testing
+
+   Usually when I develop something temporary tests for it. So maybe allow for tests through out the code base.
+
+* Non-smooth differential
+
+  There should be a way to compute differential and gradient of non-smooth functions.
+  The most important cases are:
+    1. norm/absolute value
+    2. min/max functions
+    3. signed distance function
+
+  I believe that 1. and 2. can be achieved by defining differential as an average of a differential in positive and negative direction and requiring that this differential is a linear function. Then pre/post composition by smooth function should satisfy chain rule.
+
+  Can this be generalized to signed distance functions? 
+
+  I do not believe that there is a reasonable way to define differential such that a useful chain rule holds. It has to be an inequality, look at notes: [[https://arxiv.org/pdf/1708.04180.pdf][Nonsmooth Analysis And Optimization]] and this [[https://mathoverflow.net/questions/355666/does-the-generalised-directional-derivative-satisfy-any-version-of-the-chain-rul][MathOverflow question]] for counter example.
+
+  Another counter example is:
+    g(x) := max(0,x)
+    f(x) := a*max(0,x) + b*min(0,x)
+
+    f(g(x)) := a*max(0,x)
+
+  If derivative is an average of derivative in positive and negative direction:  
+    g'(0) := 1/2
+    f'(0) := (a+b)/2
+    (f∘g)'(0) := a/2
+
+    f'(0)*g'(0) = (a+b)/4 ≠ a/2 = (f∘g)'(0)
+ 
+* Diffeological spaces and tangent space
+
+  Define diffeological space and its tangent space, smooth function between them and differential
+
+  The question what notion of tangent space should we use? Maybe we can use only diffeological spaces that are convenient vector spaces or their subsets and quotients.
+
+* Differentiability at point
+
+  Try define smoothness/differentiability at a point. I really want to work with =1/x= without problems and assume that it is differentiable for every =x≠0=.
+  
+* Machine learning
+
+ - table interface
+ - back propagation
+ - simple fully connected network
+
+* CPU & GPU compiling
+
+  - separate repo [[https://github.com/lecopivo/lean4-karray][lean-karray]]
+
+* Houdini integration
+
+  - Basic data transfer
+    - Make detail glob attribute holding lean data
+    - NArray <-> Houdini Volume
+    - Prismatic mesh <-> Houdini geometry
+    - NArray <-> Geometry attributes
+
+  - Basic wrangle node
+
+* Mesh
+
+  - Prism
+  - Prismatic mesh
+    - presheaf on Prism
+    - generalization of [[https://en.wikipedia.org/wiki/Delta_set][delta set]]
+  - product of meshes
+
+  - conversion for simplicial complex to Prismatic Mesh
+  - conversion of cell complex (made out of prisms) to Prismatic Mesh
+    I do not think this is in general possible. Probably possible only after certain subdivision.
+  
+* Runtime symbolic module
+
+  - working with polynomials, differential forms, tensor products
+
+**  Goal is to get isomorphisms:
+    
+    𝓟[U×V, K] ≅ 𝓟[U, 𝓟[V, K]]
+    
+  - Using these isomorphisms we can get polynomial to a form 𝓟[ℝ, K] and on that we can define HornerForm is K has HornerForm
+
+  - In some sense these isomorphisms must be true:
+
+    𝓐[U×V, K] ≅ 𝓐[U, 𝓐[V, K]]
+    
+    𝓐[U×V, 𝓟[U×V]] ≅ 𝓐[U, 𝓟[U, 𝓐[V, 𝓟[V]]]]
+
+    Is this the most efficient way to evaluate differential forms?
+    
+    Define right and left smul for algebras! Then I should be able to do
+
+    𝓐[U×V, K] ≅ 𝓐[U, 𝓐[V, K]]
+
+* Finite Element
+
+  - define finite element over Prism
+  - define global finite element space
+  - system assembly
+
+* Approximating Spaces
+
+  - Define abstract interface for a type to approximate another type
+  - will be useful for creating finite elements, hybrid methods
+    or finite elements
+
+* Manifolds through Quot
+
+  - If I have a projection on vector space X. There is quite reasonable definition of smooth math on the quotient.
+
+* Invertible programming
+
+  - investigate more how to generate inverses
+  - define left and right inverses
+  - watch out for [[https://en.wikipedia.org/wiki/Axiom_of_choice#In_constructive_mathematics][axiom of choice]]
+  - array modification
