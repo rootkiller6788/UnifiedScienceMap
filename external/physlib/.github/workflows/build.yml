@@ -1,0 +1,106 @@
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+
+name: Style linters
+
+jobs:
+  doc_lint:
+    name: Lean based style linters
+    runs-on: ubuntu-latest
+    steps:
+
+      - uses: actions/checkout@v4
+
+      - name: Install elan
+        run: |
+          set -o pipefail
+          curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf | sh -s -- --default-toolchain none -y
+          ~/.elan/bin/lean --version
+          echo "$HOME/.elan/bin" >> $GITHUB_PATH
+
+      - name: check versions
+        run: |
+          lean --version
+          lake --version
+
+      - name: build cache
+        run: |
+          lake exe cache get
+
+      - name: build Physlib
+        id: build
+        uses: liskin/gh-problem-matcher-wrap@v3
+        with:
+          linters: gcc
+          run: |
+            bash -o pipefail -c "env LEAN_ABORT_ON_PANIC=1 lake build -KCI | tee stdout.log"
+
+      - name: check file imports
+        run: |
+          bash -o pipefail -c "env LEAN_ABORT_ON_PANIC=1 lake exe check_file_imports"
+
+      - name: check for duplicate TODO tags
+        run: |
+          bash -o pipefail -c "env LEAN_ABORT_ON_PANIC=1 lake exe check_dup_tags"
+
+      - name: sorryful and psuedo attribute linter
+        run: |
+          bash -o pipefail -c "env LEAN_ABORT_ON_PANIC=1 lake exe sorry_lint"
+
+      - name: runLinter on Physlib
+        if: ${{ always() && steps.build.outcome == 'success' || steps.build.outcome == 'failure' }}
+        id: lint
+        uses: liskin/gh-problem-matcher-wrap@v3
+        timeout-minutes: 4
+        with:
+          linters: gcc
+          run: env LEAN_ABORT_ON_PANIC=1 lake exe runPhyslibLinters
+
+  style_lint:
+    name: Python based style linter
+    runs-on: ubuntu-latest
+    steps:
+      - name: cleanup
+        run: |
+          find . -name . -o -prune -exec rm -rf -- {} +
+
+      - uses: actions/checkout@v4
+
+      # Run the case checker action
+      - name: Check Case Sensitivity
+        uses: credfeto/action-case-checker@v1.3.0
+
+      - name: Look for ignored files
+        uses: credfeto/action-no-ignored-files@v1.1.0
+
+      - name: install Python
+        if: ${{ 'ubuntu-latest' == 'ubuntu-latest' }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: 3.8
+
+      - name: lint
+        run: |
+          chmod u+x scripts/lint-style.sh
+          ./scripts/lint-style.sh
+
+      - name: Check API maps
+        run: |
+          python -m pip install PyYAML==6.0.2
+          python scripts/api_map_linter.py --repo .
+
+  codespell:
+    name: Check for spelling errors
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: codespell-project/actions-codespell@v2
+        with:
+          exclude_file: scripts/MetaPrograms/spellingWords.txt,scripts/physlibNoShake.json
+          ignore_words_file: .codespellignore

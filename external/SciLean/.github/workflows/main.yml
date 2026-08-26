@@ -1,0 +1,69 @@
+name: Lean Action CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+        - name: Linux-x86_64
+          os: ubuntu-latest
+        # - name: macOS-aarch64
+        #   os: macos-latest
+        - name: macOS-x86_64
+          os: macos-13
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Install BLAS/Linux
+      if: runner.os == 'Linux'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libopenblas-dev
+
+    - name: Install BLAS/MacOS
+      if: runner.os == 'macOS'
+      run: |
+        brew install openblas
+
+    - name: Set up Lean
+      uses: leanprover/lean-action@v1
+      with:
+        auto-config: false
+        use-github-cache: false
+        
+    - name: Build project
+      run: |
+        lake build leanblas
+        lake build
+
+    - name: Test project
+      run: lake test
+
+    - name: Run Examples
+      run: make examples
+
+    - name: Purge Disk Cache # https://github.com/actions/runner-images/issues/2619
+      if: github.event_name == 'release' && runner.os == 'macOS'
+      run: sudo /usr/sbin/purge
+
+    - name: Upload Release Artifact
+      if: github.event_name == 'release'
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        TAG: ${{ github.event.release.tag_name }}
+      run: lake upload $TAG
+

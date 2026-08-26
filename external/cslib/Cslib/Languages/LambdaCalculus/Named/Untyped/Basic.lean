@@ -1,0 +1,161 @@
+/-
+Copyright (c) 2025 Fabrizio Montesi. All rights reserved.
+Released under Apache 2.0 license as described in the file LICENSE.
+Authors: Fabrizio Montesi, Haoxuan Yin
+-/
+
+module
+
+public import Cslib.Foundations.Data.HasFresh
+public import Cslib.Foundations.Syntax.HasAlphaEquiv
+public import Cslib.Foundations.Syntax.HasSubstitution
+
+/-! # λ-calculus
+
+The untyped λ-calculus, with a named representation of variables. This file contains the definitions
+of α-equivalence and capture-avoiding substitution.
+
+## References
+
+* [H. Barendregt, *Introduction to Lambda Calculus*][Barendregt1984]
+* Definition of α-equivalence [M. Gabbay and A. Pitts, *A New Approach to Abstract Syntax with
+Variable Binding*][Gabbay2002]
+
+-/
+
+@[expose] public section
+
+namespace Cslib
+
+universe u
+
+variable {Var : Type u} [DecidableEq Var] [HasFresh Var]
+
+namespace LambdaCalculus.Named.Untyped
+
+/-- Syntax of terms. -/
+inductive Term (Var : Type u) : Type u where
+  | var (x : Var)
+  | abs (x : Var) (m : Term Var)
+  | app (m n : Term Var)
+deriving DecidableEq
+
+namespace Term
+
+/-- Free variables. -/
+@[simp, scoped grind =]
+def fv : Term Var → Finset Var
+  | var x => {x}
+  | abs x m => m.fv \ {x}
+  | app m n => m.fv ∪ n.fv
+
+/-- Bound variables. -/
+@[simp, scoped grind =]
+def bv : Term Var → Finset Var
+  | var _ => ∅
+  | abs x m => m.bv ∪ {x}
+  | app m n => m.bv ∪ n.bv
+
+/-- Variable names (free and bound) in a term. -/
+@[simp, scoped grind =]
+def vars : Term Var → Finset Var
+  | var x => {x}
+  | abs x m => m.vars ∪ {x}
+  | app m n => m.vars ∪ n.vars
+
+/-- Variable renaming, applying to both free and bound variables.
+    `m.rename x y` changes all occurrences of `x` into `y` in `m`. -/
+@[simp, scoped grind =]
+def rename (m : Term Var) (x y : Var) : Term Var :=
+  match m with
+  | var z => var (if z = x then y else z)
+  | abs z m' => abs (if z = x then y else z) (m'.rename x y)
+  | app n1 n2 => app (n1.rename x y) (n2.rename x y)
+
+omit [HasFresh Var] in
+/-- Renaming preserves size. -/
+@[simp, scoped grind =]
+theorem rename_eq_sizeOf {m : Term Var} {x y : Var} : sizeOf (m.rename x y) = sizeOf m := by
+  induction m <;> aesop (add simp [Term.rename])
+
+/-- α-equivalence. -/
+inductive AlphaEquiv : Term Var → Term Var → Prop where
+  | var {x} : AlphaEquiv (var x) (var x)
+  | abs {y x1 x2 m1 m2} : y ∉ m1.vars ∪ m2.vars ∪ {x1, x2} →
+    AlphaEquiv (m1.rename x1 y) (m2.rename x2 y) → AlphaEquiv (abs x1 m1) (abs x2 m2)
+  | app {m1 n1 m2 n2} : AlphaEquiv m1 n1 → AlphaEquiv m2 n2 → AlphaEquiv (app m1 m2) (app n1 n2)
+
+/-- Instance for the notation `m =α n`. -/
+instance instHasAlphaEquivTerm : HasAlphaEquiv (Term Var) where
+  AlphaEquiv := AlphaEquiv
+
+omit [HasFresh Var] in
+/-- Allow grind to recognise the notation of α-equivalence. -/
+@[simp, scoped grind _=_]
+theorem AlphaEquiv_def (m n : Term Var) : m =α n ↔ AlphaEquiv m n := by
+  rfl
+
+/-- Capture-avoiding substitution, as an inference system. -/
+inductive Subst : Term Var → Var → Term Var → Term Var → Prop where
+  | varHit {x r} : (var x).Subst x r r
+  | varMiss {x y r} : y ≠ x → (var y).Subst x r (var y)
+  | absShadow {x m r} : (abs x m).Subst x r (abs x m)
+  | absIn {x y m r m'} : y ∉ r.fv ∪ {x} → m.Subst x r m' → (abs y m).Subst x r (abs y m')
+  | app {m n x r m' n'} : m.Subst x r m' → n.Subst x r n' → (app m n).Subst x r (app m' n')
+  | alpha {m m' r r' n n' x} : m =α m' → r =α r' → n =α n' → Subst m x r n → m'.Subst x r' n'
+
+/-- Capture-avoiding substitution. `m.subst x r` replaces the free occurrences of variable `x`
+in `m` with `r`. -/
+@[simp, scoped grind =]
+def subst (m : Term Var) (x : Var) (r : Term Var) :
+    Term Var :=
+  match m with
+  | var y => if y = x then r else var y
+  | abs y m' =>
+    if y = x then
+      abs y m'
+    else if y ∉ r.fv then
+      abs y (m'.subst x r)
+    else
+      let z := HasFresh.fresh (m'.vars ∪ r.vars ∪ {x, y})
+      abs z ((m'.rename y z).subst x r)
+  | app m1 m2 => app (m1.subst x r) (m2.subst x r)
+termination_by m
+decreasing_by all_goals grind
+
+/-- `Term.subst` is a substitution for λ-terms. Gives access to the notation `m[x := n]`. -/
+instance instHasSubstitutionTerm :
+    HasSubstitution (Term Var) Var (Term Var) where
+  subst := subst
+
+/-- Allow grind to recognise the notation of substitution. -/
+@[simp, scoped grind _=_]
+theorem subst_def (m r : Term Var) (x : Var) : m[x := r] = m.subst x r := by
+  rfl
+
+/-- Contexts. -/
+inductive Context (Var : Type u) : Type u where
+  | hole
+  | abs (x : Var) (c : Context Var)
+  | appL (c : Context Var) (m : Term Var)
+  | appR (m : Term Var) (c : Context Var)
+deriving DecidableEq
+
+/-- Replaces the hole in a `Context` with a `Term`. -/
+def Context.fill (c : Context Var) (m : Term Var) : Term Var :=
+  match c with
+  | hole => m
+  | abs x c => Term.abs x (c.fill m)
+  | appL c n => Term.app (c.fill m) n
+  | appR n c => Term.app n (c.fill m)
+
+/-- Variables (both free and bound) in a context. -/
+def Context.vars : Context Var → Finset Var
+  | hole => ∅
+  | abs x c => c.vars ∪ {x}
+  | appL c m => c.vars ∪ m.vars
+  | appR m c => m.vars ∪ c.vars
+
+end LambdaCalculus.Named.Untyped.Term
+
+end Cslib
