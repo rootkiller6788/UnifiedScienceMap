@@ -1091,9 +1091,7 @@ function drawAxes(k) {
   ctx.restore();
 }
 
-// 悬停高亮：显示该节点全部关联节点和连线——
-//   同领域连线 = 该领域色（黄）；跨领域连线 = 两领域色渐变（蓝→黄）；
-//   节点和线都发光（宽透明 halo + 亮主线/亮环）。
+// 悬停高亮：不放大节点，只显示关系链和相关节点。
 function drawHover(k) {
   const i = state.hover;
   const n = state.data.nodes;
@@ -1104,9 +1102,10 @@ function drawHover(k) {
   // 收集 1 跳邻居（邻接表 O(deg)，不再全量扫边）
   const neigh = state.adj[i] || [];
 
-  const baseR = nodeR(k);
+  ctx.save();
+  ctx.globalCompositeOperation = 'source-over';
 
-  // 1) 关联连线（发光）
+  // 1) 关联连线（细虚线，不做夸张光晕）
   for (const j of neigh) {
     if (state.hiddenDirs.has(n.dir[j])) continue;
     const x1 = xs[i], y1 = ys[i], x2 = xs[j], y2 = ys[j];
@@ -1120,32 +1119,43 @@ function drawHover(k) {
       g.addColorStop(1, `rgba(${colorB.rgb},0.95)`);
       stroke = g;
     }
-    ctx.beginPath();
-    ctx.moveTo(x1, y1); ctx.lineTo(x2, y2);
+    drawCurvedEdgePath(x1, y1, x2, y2, i, j);
     ctx.strokeStyle = stroke;
-    ctx.lineWidth = 4.5 / k; ctx.globalAlpha = 0.16; ctx.stroke();  // 发光 halo
-    ctx.lineWidth = 1.6 / k; ctx.globalAlpha = 1; ctx.stroke();      // 亮主线
+    ctx.setLineDash([4 / k, 6 / k]);
+    ctx.lineWidth = 1.2 / k;
+    ctx.globalAlpha = 0.58;
+    ctx.stroke();
   }
+  ctx.setLineDash([]);
 
-  // 2) 高亮邻居节点（领域色光晕 + 亮环）
+  // 2) 相关节点（保持正常大小，只提高可见度）
   for (const j of neigh) {
     if (state.hiddenDirs.has(n.dir[j])) continue;
     const col = state.dirColor.get(n.dir[j]);
-    ctx.beginPath(); ctx.arc(xs[j], ys[j], baseR * 4, 0, Math.PI * 2);
-    ctx.fillStyle = `rgba(${col.rgb},0.16)`; ctx.fill();
-    ctx.beginPath(); ctx.arc(xs[j], ys[j], baseR * 2.0, 0, Math.PI * 2);
-    ctx.strokeStyle = `rgba(${col.rgb},0.9)`; ctx.lineWidth = 1.3 / k; ctx.stroke();
+    const r = visualNodeRadius(j, k);
+    ctx.beginPath(); ctx.arc(xs[j], ys[j], r, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(${col.rgb},0.92)`;
+    ctx.fill();
+    ctx.beginPath(); ctx.arc(xs[j], ys[j], r, 0, Math.PI * 2);
+    ctx.strokeStyle = `rgba(${col.rgb},0.62)`;
+    ctx.lineWidth = 0.85 / k;
+    ctx.stroke();
   }
 
-  // 3) 悬停者本身（领域色光晕 + 亮白环）
-  ctx.beginPath(); ctx.arc(xs[i], ys[i], baseR * 5, 0, Math.PI * 2);
-  ctx.fillStyle = `rgba(${colorA.rgb},0.22)`; ctx.fill();
-  ctx.beginPath(); ctx.arc(xs[i], ys[i], baseR * 2.2, 0, Math.PI * 2);
-  ctx.strokeStyle = '#fff'; ctx.lineWidth = 2 / k; ctx.stroke();
+  // 3) 当前节点（正常大小 + 细白环）
+  const hoverR = visualNodeRadius(i, k);
+  ctx.beginPath(); ctx.arc(xs[i], ys[i], hoverR, 0, Math.PI * 2);
+  ctx.fillStyle = `rgba(${colorA.rgb},1)`;
+  ctx.fill();
+  ctx.beginPath(); ctx.arc(xs[i], ys[i], hoverR, 0, Math.PI * 2);
+  ctx.strokeStyle = 'rgba(255,255,255,0.86)';
+  ctx.lineWidth = 1.1 / k;
+  ctx.stroke();
+  ctx.restore();
 
   // 4) hover 信息
   $('hoverInfo').textContent =
-    `${n.label[i]} · ${n.kind[i]} · ${n.module[i]} · ${dirA} · ${n.year[i].toFixed(1)}年 · 深度${(n.depth[i] * 100).toFixed(0)} · ${neigh.length}条连线`;
+    `${n.label[i]} · ${n.kind[i]} · ${n.module[i]} · ${dirA} · ${n.year[i].toFixed(1)} · depth ${(n.depth[i] * 100).toFixed(0)} · ${neigh.length} links`;
   $('hoverInfo').style.color = colorA.color;
 }
 
