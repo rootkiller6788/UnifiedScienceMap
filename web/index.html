@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Mathlib Knowledge Map</title>
+  <title>Unified Science Map</title>
   <style>
     :root {
       --bg: #000;
@@ -19,7 +19,7 @@
     #graph { z-index: 1; cursor: grab; }
     #graph:active { cursor: grabbing; }
 
-    .panel { position: fixed; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; backdrop-filter: blur(10px); box-shadow: 0 14px 42px rgba(0,0,0,0.42); font-size: 12.5px; line-height: 1.6; }
+    .panel { position: fixed; z-index: 10; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; backdrop-filter: blur(10px); box-shadow: 0 14px 42px rgba(0,0,0,0.42); font-size: 12.5px; line-height: 1.6; }
     #hud { bottom: 62px; left: 14px; display: flex; flex-direction: column; gap: 6px; transition: opacity 0.15s; }
     #hud.collapsed { display: none; }
     #hud .hud-row { display: flex; gap: 14px; align-items: flex-start; }
@@ -27,7 +27,8 @@
     #hud .gauge b { font-size: 13px; }
     #hud .gauge span { color: var(--muted); font-size: 11px; }
     #hoverInfo { color: var(--muted); font-size: 11px; max-width: 340px; border-bottom: 1px solid var(--border); padding-bottom: 6px; margin-bottom: 4px; min-height: 18px; }
-    #legend { max-height: 46vh; overflow-y: auto; min-width: 170px; }
+    #legend { max-height: 46vh; overflow-y: auto; min-width: 170px; scrollbar-width: none; -ms-overflow-style: none; }
+    #legend::-webkit-scrollbar { width: 0; height: 0; }
     #legend .sw { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 8px; vertical-align: middle; }
     #legend .item { cursor: pointer; padding: 2px 4px; border-radius: 4px; }
     #legend .item:hover { background: rgba(255,255,255,0.08); }
@@ -49,6 +50,9 @@
     #searchbox input { width: 100%; background: rgba(0,0,0,0.35); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 7px 10px; font-size: 12.5px; outline: none; }
     #searchbox input:focus { border-color: #58a6ff; }
     #searchbox .hint { color: var(--muted); font-size: 11px; margin-top: 5px; }
+    #fpsPanel { top: 14px; left: 14px; min-width: 86px; padding: 6px 10px; display: none; }
+    #fpsPanel .label { color: var(--muted); font-size: 10px; letter-spacing: 0; text-transform: uppercase; }
+    #fpsPanel .value { display: block; color: var(--fg); font-size: 18px; font-weight: 650; line-height: 1.15; }
 
     #loading { position: fixed; inset: 0; display: flex; flex-direction: column; gap: 14px; align-items: center; justify-content: center; background: var(--bg); z-index: 50; }
     #loading.hidden { display: none; }
@@ -69,11 +73,16 @@
     <div class="hint" id="searchHint"></div>
   </div>
 
+  <div id="fpsPanel" class="panel">
+    <span class="label">FPS</span>
+    <span id="fpsValue" class="value">--</span>
+  </div>
+
   <div id="hud" class="panel">
     <div id="hoverInfo"></div>
     <div class="hud-row">
       <div class="gauge"><b id="nodeCount">-</b><span>Declarations</span></div>
-      <div class="gauge"><b id="edgeCount">-</b><span>Dependency Links</span></div>
+      <div class="gauge"><b id="edgeCount">-</b><span>Relations</span></div>
       <div id="legend"></div>
     </div>
   </div>
@@ -91,7 +100,7 @@
 
   <div id="loading">
     <div class="spinner"></div>
-    <p id="loadingText">Loading declaration map data (153k nodes, about 17.7 MB)...</p>
+    <p id="loadingText">Loading unified science map data...</p>
   </div>
 
   <div class="toast" id="toast"></div>

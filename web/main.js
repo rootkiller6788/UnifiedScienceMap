@@ -1,5 +1,5 @@
 // main.js — 数学声明「科研地图」渲染器 v3（统一坐标公式版，15 万级节点）。
-// 数据 decls.json（列式 SoA）：nodes.label/kind/dir/module/depth/x/y + edges + dirs。
+// 数据 unified-decls.json（列式 SoA）：nodes.label/kind/dir/module/depth/x/y + metadata + edges + dirs。
 //   X = 数学形式化时间（模块首次进库，2021→2026）
 //   Y = 0.7·社区深度 + 0.2·模块深度 + 0.05·类型权重 + 0.05·局部扰动（基础低、构造高）
 // 网络模式另做轴向重映射（NET_PLOT）：只纵向压缩（横向不变），让学科簇变扁呈横向长条（整体模式不变）。
@@ -10,6 +10,8 @@
 
 import { zoom, zoomIdentity } from 'https://cdn.jsdelivr.net/npm/d3-zoom@3/+esm';
 import { select } from 'https://cdn.jsdelivr.net/npm/d3-selection@3/+esm';
+import { GlRenderer } from './gl-renderer.js';
+import { createWasmSpatialIndex } from './wasm-index.js';
 
 // ---- 常量 ----
 const LOD_K = 3.0;             // 模式由按钮切换；该值仅作搜索定位的放大目标缩放
@@ -21,9 +23,6 @@ const CULL_MARGIN = 60;
 const WORLD_W = 1600;
 const WORLD_H = 900;
 const GRID_CELL = 26;          // hover 空间网格单元（世界像素）
-const SCREEN_CELL = 20;        // 高保真节点屏幕密度限流单元（屏幕像素）
-const MAX_DRAWN = 8000;        // 每帧最多绘制的高保真节点数
-const MAX_DRAWN_DEEP = 50000;
 const MAX_LABELS = 220;        // 每帧最多绘制的标签数
 const MAX_EDGES = 6000;        // 每帧最多 stroke 的可见边数（低缩放边太密时降噪+提速）
 const EDGE_CURVE = 0.16;
@@ -64,6 +63,43 @@ const DIR_PALETTE = new Map(Object.entries({
   Logic: '#1e90ff',
   Order: '#b05b25',
   Data: '#9a9a9a',
+  Structures: '#f7f7a1',
+  Systems: '#70d6ff',
+  Matter: '#b967ff',
+  Fields: '#ffd166',
+  Computation: '#4cc9f0',
+  Optimization: '#f8961e',
+  Learning: '#f72585',
+  Measurement: '#c7d2fe',
+  Foundations: '#b9fbc0',
+  Languages: '#80ffdb',
+  Logics: '#4cc9f0',
+  MachineLearning: '#f72585',
+  Crypto: '#ffd166',
+  Algorithms: '#90be6d',
+  AD: '#ff7b00',
+  Modules: '#06d6a0',
+  Numerics: '#f8961e',
+  SpecialFunctions: '#00bbf9',
+  ClassicalMechanics: '#ffcf5a',
+  SpaceAndTime: '#58d6ff',
+  Relativity: '#4ea2ff',
+  Electromagnetism: '#ffd166',
+  Optics: '#fff275',
+  FluidDynamics: '#45f0c1',
+  Thermodynamics: '#ff8f5a',
+  StatisticalMechanics: '#ff6f91',
+  CondensedMatter: '#a28cff',
+  QuantumMechanics: '#b967ff',
+  QuantumInfo: '#6ee7ff',
+  QFT: '#ff4fd8',
+  Particles: '#ff5a7a',
+  StringTheory: '#d77cff',
+  Cosmology: '#7aa2ff',
+  Units: '#c7d2fe',
+  ClassicalFieldTheory: '#ff9fdb',
+  PhysicsAlpha: '#9ca3af',
+  Meta: '#7f8c8d',
 }));
 
 const NETWORK_LABELS = new Set([
@@ -93,6 +129,31 @@ const NETWORK_LABELS = new Set([
   'Logic',
   'Order',
   'Data',
+  'Foundations',
+  'Languages',
+  'Logics',
+  'MachineLearning',
+  'Crypto',
+  'Algorithms',
+  'AD',
+  'Modules',
+  'Numerics',
+  'SpecialFunctions',
+  'ClassicalMechanics',
+  'SpaceAndTime',
+  'Relativity',
+  'Electromagnetism',
+  'FluidDynamics',
+  'Thermodynamics',
+  'StatisticalMechanics',
+  'CondensedMatter',
+  'QuantumMechanics',
+  'QuantumInfo',
+  'QFT',
+  'Particles',
+  'StringTheory',
+  'Cosmology',
+  'ClassicalFieldTheory',
 ]);
 
 // 节点世界半径：屏幕尺寸随缩放温和增长（放大视图节点也变大，而非恒定 2.2px 显得缩小）
@@ -100,7 +161,7 @@ const NETWORK_LABELS = new Set([
 const nodeR = (k) => NODE_R_SCREEN * Math.pow(k, 0.4) / k;
 
 const glCanvas = document.getElementById('glgraph');
-const gl = glCanvas?.getContext('webgl2', { antialias: true, alpha: false });
+const glRenderer = new GlRenderer(glCanvas, { onError: showToast });
 const canvas = document.getElementById('graph');
 const ctx = canvas.getContext('2d');
 const $ = (id) => document.getElementById(id);
@@ -109,6 +170,7 @@ const state = {
   data: null,
   dirColor: new Map(),      // dirName -> {color, rgb}
   nodeDirIdx: [],           // 节点 -> dir 索引
+  domains: [],
   dirMembers: [],           // dir 索引 -> [节点索引]
   degrees: null,            // Int32Array
   maxDegree: 1,
@@ -118,17 +180,18 @@ const state = {
   drawnList: [],            // 本帧实际绘制的高保真节点（标签/悬停用）
   hoverGrid: new Map(),     // 'cx,cy' -> [节点索引]（空间索引，桶内按度降序）
   adj: null,                // 邻接表（hover 查邻居 O(deg)，不再全量扫边）
-  visited: new Uint8Array(0), // 屏幕格位图（节点去重，复用，避免每帧 new Map）
-  perDirPool: [],           // drawCrispNodes 每帧复用的 perDir 数组池
-  listPool: [],             // drawCrispNodes 每帧复用的 list
+  listPool: [],             // 标签/hover 可见节点列表复用缓存
   transform: { x: 0, y: 0, k: 1 },
   fitK: 1,                  // 最远视图缩放（整图铺满屏）＝缩放下限
   mode: 'overview',         // 'overview' 整体模式（学科聚合）| 'network' 网络模式（声明网络）
   hover: -1,
   hiddenDirs: new Set(),
   dpr: 1,
-  glNodes: null,
-  glEdges: null,
+  glRenderer,
+  wasmIndex: null,
+  fpsLast: 0,
+  fpsAvg: 0,
+  fpsLastPaint: 0,
 };
 
 // ---- 初始化 ----
@@ -139,28 +202,76 @@ async function init() {
   setupUI();
 
   try {
-    const res = await fetch('decls.json');
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    state.data = await res.json();
+    state.data = await loadDatasets();
   } catch (err) {
-    showToast('Failed to load decls.json: ' + err.message);
+    showToast('Failed to load map data: ' + err.message);
     return;
   }
   buildGraph();
+  await initWasmIndex();
   buildLegend();
   $('loading').classList.add('hidden');
   fitView(0);
   requestAnimationFrame(render);
 }
 
+async function loadDatasets() {
+  try {
+    const unified = await fetch('unified-decls.json');
+    if (unified.ok) return await unified.json();
+  } catch {
+    // Fall back to the older split files during local iteration.
+  }
+
+  const res = await fetch('decls.json');
+  if (!res.ok) throw new Error('HTTP ' + res.status);
+  const data = await res.json();
+
+  await loadOptionalPhysicsLayer(data);
+
+  return data;
+}
+
+async function loadOptionalPhysicsLayer(data) {
+  for (const name of ['physlib-decls.json', 'physlib-preview.json']) {
+    try {
+      const res = await fetch(name);
+      if (!res.ok) continue;
+      mergePhysicsLayer(data, await res.json(), name);
+      return;
+    } catch {
+      // Physics layers are optional; the base math map should still load.
+    }
+  }
+}
+
+function mergePhysicsLayer(data, layer, layerName) {
+  const offset = data.nodes.label.length;
+  for (const d of layer.dirs || []) {
+    if (!data.dirs.some((existing) => existing.name === d.name)) data.dirs.push(d);
+  }
+
+  for (const key of Object.keys(data.nodes)) {
+    const incoming = layer.nodes?.[key];
+    if (Array.isArray(incoming)) data.nodes[key].push(...incoming);
+    else data.nodes[key].push(...new Array(layer.nodes.label.length).fill(null));
+  }
+
+  for (const [s, t] of layer.edges || []) {
+    data.edges.push([s + offset, t + offset]);
+  }
+
+  data.meta.conceptCount = data.nodes.label.length;
+  data.meta.edgeCount = data.edges.length;
+  data.meta.dirCount = data.dirs.length;
+  data.meta.physicsLayer = layerName;
+  data.meta.physicsNodeCount = layer.nodes.label.length;
+}
+
 function resize() {
   state.dpr = Math.min(window.devicePixelRatio || 1, 2);
   if (glCanvas) {
-    glCanvas.width = Math.floor(innerWidth * state.dpr);
-    glCanvas.height = Math.floor(innerHeight * state.dpr);
-    glCanvas.style.width = innerWidth + 'px';
-    glCanvas.style.height = innerHeight + 'px';
-    if (gl) gl.viewport(0, 0, glCanvas.width, glCanvas.height);
+    state.glRenderer.resize(innerWidth, innerHeight, state.dpr);
   }
   canvas.width = Math.floor(innerWidth * state.dpr);
   canvas.height = Math.floor(innerHeight * state.dpr);
@@ -190,6 +301,9 @@ function buildGraph() {
   const dirIndex = new Map(dirs.map((d, i) => [d.name, i]));
   state.nodeDirIdx = new Uint16Array(n);
   for (let i = 0; i < n; i++) state.nodeDirIdx[i] = dirIndex.get(nodes.dir[i]);
+  state.domains = state.data.domains?.length
+    ? state.data.domains
+    : [...new Set(nodes.domain || [])].filter(Boolean).map((name) => ({ name, count: nodes.domain.filter((d) => d === name).length }));
 
   dirs.forEach((d, i) => {
     const color = DIR_PALETTE.get(d.name);
@@ -218,7 +332,6 @@ function buildGraph() {
   state.degrees = deg;
   state.maxDegree = maxDeg;
   state.adj = adj;
-  state.perDirPool = Array.from({ length: dirs.length }, () => []);
   state.listPool = [];
 
   const agg = new Map();
@@ -236,202 +349,29 @@ function buildGraph() {
   applyNetLayout();   // 网络模式轴向重映射（只纵向压缩；整体模式用 dirs.cx/cy，不受影响）
   computeDirCenters();
   computeNetworkBounds();
-  initGlNodes();
-  initGlEdges();
+  state.glRenderer.init({
+    data: state.data,
+    dirColor: state.dirColor,
+    nodeDirIdx: state.nodeDirIdx,
+    degrees: state.degrees,
+    maxDegree: state.maxDegree,
+  });
   buildHoverGrid();   // 空间索引（桶内已按度降序，替代全局 degreeOrder）
 }
 
-function initGlNodes() {
-  if (!gl) return;
-  const { nodes } = state.data;
-  const n = nodes.x.length;
-  const stride = 7;
-  const data = new Float32Array(n * stride);
-  const sqrtMax = Math.sqrt(state.maxDegree);
-  for (let i = 0; i < n; i++) {
-    const rgb = parseRgb(state.dirColor.get(nodes.dir[i]).rgb);
-    const o = i * stride;
-    data[o] = nodes.x[i];
-    data[o + 1] = nodes.y[i];
-    data[o + 2] = rgb[0] / 255;
-    data[o + 3] = rgb[1] / 255;
-    data[o + 4] = rgb[2] / 255;
-    data[o + 5] = Math.sqrt(state.degrees[i]) / sqrtMax;
-    data[o + 6] = state.nodeDirIdx[i];
+async function initWasmIndex() {
+  state.wasmIndex = await createWasmSpatialIndex({ onError: showToast });
+  if (!state.wasmIndex) return;
+  try {
+    state.wasmIndex.init({
+      data: state.data,
+      nodeDirIdx: state.nodeDirIdx,
+      degrees: state.degrees,
+    });
+  } catch (err) {
+    state.wasmIndex = null;
+    showToast('WASM index disabled: ' + err.message);
   }
-
-  const program = createGlProgram(NODE_VERTEX_SHADER, NODE_FRAGMENT_SHADER);
-  if (!program) return;
-  const vao = gl.createVertexArray();
-  const buffer = gl.createBuffer();
-  gl.bindVertexArray(vao);
-  gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
-  gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
-  bindGlAttrib(program, 'a_pos', 2, stride, 0);
-  bindGlAttrib(program, 'a_color', 3, stride, 2);
-  bindGlAttrib(program, 'a_degree', 1, stride, 5);
-  bindGlAttrib(program, 'a_dir', 1, stride, 6);
-  gl.bindVertexArray(null);
-
-  state.glNodes = {
-    program,
-    vao,
-    count: n,
-    uResolution: gl.getUniformLocation(program, 'u_resolution'),
-    uTransform: gl.getUniformLocation(program, 'u_transform'),
-    uDpr: gl.getUniformLocation(program, 'u_dpr'),
-    uBasePoint: gl.getUniformLocation(program, 'u_basePoint'),
-    uHidden: gl.getUniformLocation(program, 'u_hidden'),
-  };
-}
-
-function initGlEdges() {
-  if (!gl) return;
-  const { nodes, edges } = state.data;
-  const stride = 7;
-  const data = new Float32Array(edges.length * 2 * stride);
-  for (let ei = 0; ei < edges.length; ei++) {
-    const [s, t] = edges[ei];
-    const colorA = parseRgb(state.dirColor.get(nodes.dir[s]).rgb);
-    const colorB = parseRgb(state.dirColor.get(nodes.dir[t]).rgb);
-    writeGlEdgeVertex(data, ei * 2 * stride, nodes.x[s], nodes.y[s], colorA, state.nodeDirIdx[s], state.nodeDirIdx[t]);
-    writeGlEdgeVertex(data, (ei * 2 + 1) * stride, nodes.x[t], nodes.y[t], colorB, state.nodeDirIdx[s], state.nodeDirIdx[t]);
-  }
-
-  const program = createGlProgram(EDGE_VERTEX_SHADER, EDGE_FRAGMENT_SHADER);
-  if (!program) return;
-  const vao = gl.createVertexArray();
-  const buffer = gl.createBuffer();
-  gl.bindVertexArray(vao);
-  gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
-  gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
-  bindGlAttrib(program, 'a_pos', 2, stride, 0);
-  bindGlAttrib(program, 'a_color', 3, stride, 2);
-  bindGlAttrib(program, 'a_dirA', 1, stride, 5);
-  bindGlAttrib(program, 'a_dirB', 1, stride, 6);
-  gl.bindVertexArray(null);
-
-  state.glEdges = {
-    program,
-    vao,
-    count: edges.length * 2,
-    uResolution: gl.getUniformLocation(program, 'u_resolution'),
-    uTransform: gl.getUniformLocation(program, 'u_transform'),
-    uHidden: gl.getUniformLocation(program, 'u_hidden'),
-  };
-}
-
-function writeGlEdgeVertex(data, offset, x, y, rgb, dirA, dirB) {
-  data[offset] = x;
-  data[offset + 1] = y;
-  data[offset + 2] = rgb[0] / 255;
-  data[offset + 3] = rgb[1] / 255;
-  data[offset + 4] = rgb[2] / 255;
-  data[offset + 5] = dirA;
-  data[offset + 6] = dirB;
-}
-
-const NODE_VERTEX_SHADER = `#version 300 es
-precision highp float;
-in vec2 a_pos;
-in vec3 a_color;
-in float a_degree;
-in float a_dir;
-uniform vec2 u_resolution;
-uniform vec3 u_transform;
-uniform float u_dpr;
-uniform float u_basePoint;
-uniform float u_hidden[32];
-out vec3 v_color;
-out float v_hidden;
-void main() {
-  vec2 screen = a_pos * u_transform.z + u_transform.xy;
-  vec2 clip = (screen / u_resolution) * 2.0 - 1.0;
-  gl_Position = vec4(clip.x, -clip.y, 0.0, 1.0);
-  gl_PointSize = u_dpr * u_basePoint * (0.68 + 1.15 * a_degree);
-  v_color = a_color;
-  v_hidden = u_hidden[int(a_dir + 0.5)];
-}`;
-
-const NODE_FRAGMENT_SHADER = `#version 300 es
-precision highp float;
-in vec3 v_color;
-in float v_hidden;
-out vec4 outColor;
-void main() {
-  if (v_hidden > 0.5) discard;
-  vec2 p = gl_PointCoord * 2.0 - 1.0;
-  float d = dot(p, p);
-  if (d > 1.0) discard;
-  float core = smoothstep(1.0, 0.12, d);
-  float edge = smoothstep(1.0, 0.76, d) * 0.22;
-  outColor = vec4(v_color, max(core, edge));
-}`;
-
-const EDGE_VERTEX_SHADER = `#version 300 es
-precision highp float;
-in vec2 a_pos;
-in vec3 a_color;
-in float a_dirA;
-in float a_dirB;
-uniform vec2 u_resolution;
-uniform vec3 u_transform;
-uniform float u_hidden[32];
-out vec3 v_color;
-out float v_hidden;
-void main() {
-  vec2 screen = a_pos * u_transform.z + u_transform.xy;
-  vec2 clip = (screen / u_resolution) * 2.0 - 1.0;
-  gl_Position = vec4(clip.x, -clip.y, 0.0, 1.0);
-  v_color = a_color;
-  v_hidden = max(u_hidden[int(a_dirA + 0.5)], u_hidden[int(a_dirB + 0.5)]);
-}`;
-
-const EDGE_FRAGMENT_SHADER = `#version 300 es
-precision highp float;
-in vec3 v_color;
-in float v_hidden;
-out vec4 outColor;
-void main() {
-  if (v_hidden > 0.5) discard;
-  outColor = vec4(v_color, 0.038);
-}`;
-
-function createGlProgram(vertexSource, fragmentSource) {
-  const vs = compileGlShader(gl.VERTEX_SHADER, vertexSource);
-  const fs = compileGlShader(gl.FRAGMENT_SHADER, fragmentSource);
-  if (!vs || !fs) return null;
-  const program = gl.createProgram();
-  gl.attachShader(program, vs);
-  gl.attachShader(program, fs);
-  gl.linkProgram(program);
-  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-    showToast('WebGL program failed: ' + gl.getProgramInfoLog(program));
-    return null;
-  }
-  return program;
-}
-
-function compileGlShader(type, source) {
-  const shader = gl.createShader(type);
-  gl.shaderSource(shader, source);
-  gl.compileShader(shader);
-  if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
-    showToast('WebGL shader failed: ' + gl.getShaderInfoLog(shader));
-    return null;
-  }
-  return shader;
-}
-
-function bindGlAttrib(program, name, size, stride, offsetFloats) {
-  const loc = gl.getAttribLocation(program, name);
-  if (loc < 0) return;
-  gl.enableVertexAttribArray(loc);
-  gl.vertexAttribPointer(loc, size, gl.FLOAT, false, stride * Float32Array.BYTES_PER_ELEMENT, offsetFloats * Float32Array.BYTES_PER_ELEMENT);
-}
-
-function parseRgb(rgb) {
-  return rgb.split(',').map((v) => Number(v.trim()));
 }
 
 function hexToRgb(hex) {
@@ -521,7 +461,7 @@ function computeNetworkBounds() {
 }
 
 // hover 空间网格：cell -> [节点索引]，hover 只查指针附近 3×3 格。
-// 桶内按度降序 → drawCrispNodes 用同一索引做视口裁剪时优先画高影响力节点。
+// 视口节点筛选优先交给 WASM；这个网格保留给鼠标近邻和 WASM 不可用时的标签列表。
 function buildHoverGrid() {
   const xs = state.data.nodes.x, ys = state.data.nodes.y;
   const deg = state.degrees;
@@ -564,6 +504,15 @@ function setupZoom() {
 
 function updateCanvasCursor() {
   canvas.style.cursor = state.mode === 'overview' ? 'default' : 'grab';
+}
+
+function nodeVisible(i) {
+  const nodes = state.data.nodes;
+  return !state.hiddenDirs.has(nodes.dir[i]);
+}
+
+function dirVisible(dir) {
+  return !state.hiddenDirs.has(dir.name);
 }
 
 // 让 d3-zoom 内部状态与 state.transform 同步，防止程序化改视图后下次交互跳变/突破下限
@@ -674,7 +623,8 @@ function onSearch(q) {
   const nodes = state.data.nodes;
   let match = -1, count = 0;
   for (let i = 0; i < nodes.label.length; i++) {
-    if (nodes.label[i].toLowerCase().includes(q) || nodes.module[i].toLowerCase().includes(q)) {
+    const haystack = `${nodes.label[i]} ${nodes.module[i]} ${nodes.dir[i]}`.toLowerCase();
+    if (nodeVisible(i) && haystack.includes(q)) {
       if (match === -1) match = i;
       count++;
       if (count >= 100) break;
@@ -712,7 +662,7 @@ function onMouseMove(ev) {
       const bucket = state.hoverGrid.get((px + dx) + ',' + (py + dy));
       if (!bucket) continue;
       for (const i of bucket) {
-        if (state.hiddenDirs.has(state.data.dirs[nodeDir[i]].name)) continue;
+        if (!nodeVisible(i)) continue;
         const dxw = xs[i] - wx, dyw = ys[i] - wy, d2 = dxw * dxw + dyw * dyw;
         if (d2 < bestD) { bestD = d2; best = i; }
       }
@@ -731,15 +681,25 @@ function requestRender() {
 }
 
 function render() {
+  updateFps();
   const { dpr } = state;
   const w = innerWidth, h = innerHeight;
   const aggregate = state.mode === 'overview';
   if (glCanvas) glCanvas.style.display = aggregate ? 'none' : 'block';
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, w, h);
-  if (aggregate || !state.glNodes) drawBackground(w, h);
+  const glRendered = !aggregate && state.glRenderer.render({
+    transform: state.transform,
+    dpr: state.dpr,
+    hiddenDirs: state.hiddenDirs,
+    basePoint: NODE_R_SCREEN * Math.pow(state.transform.k, 0.4),
+    edgeStartK: state.fitK,
+    width: innerWidth,
+    height: innerHeight,
+    dirs: state.data?.dirs || [],
+  });
+  if (aggregate || !glRendered) drawBackground(w, h);
   if (!state.data) return;
-  if (!aggregate && state.glNodes) renderGlNodes();
 
   const { x, y, k } = state.transform;
   const vLeft = -x / k, vRight = (w - x) / k, vTop = -y / k, vBottom = (h - y) / k;
@@ -757,6 +717,31 @@ function render() {
   if (aggregate) drawAxes(k);
   $('nodeCount').textContent = state.data.meta.conceptCount.toLocaleString();
   $('edgeCount').textContent = state.data.meta.edgeCount.toLocaleString();
+  if (state.mode === 'network') requestRender();
+}
+
+function updateFps() {
+  const panel = $('fpsPanel');
+  if (!panel) return;
+  const network = state.mode === 'network';
+  panel.style.display = network ? 'block' : 'none';
+  if (!network) {
+    state.fpsLast = 0;
+    return;
+  }
+
+  const now = performance.now();
+  if (state.fpsLast > 0) {
+    const instant = 1000 / Math.max(1, now - state.fpsLast);
+    state.fpsAvg = state.fpsAvg ? state.fpsAvg * 0.88 + instant * 0.12 : instant;
+  }
+  state.fpsLast = now;
+
+  if (now - state.fpsLastPaint > 180) {
+    const value = $('fpsValue');
+    if (value) value.textContent = state.fpsAvg ? Math.round(state.fpsAvg).toString() : '--';
+    state.fpsLastPaint = now;
+  }
 }
 
 function drawBackground(w, h) {
@@ -770,44 +755,20 @@ function drawBackground(w, h) {
   ctx.fillRect(0, 0, w, h);
 }
 
-function renderGlNodes() {
-  const layer = state.glNodes;
-  if (!gl || !layer) return;
-  const hidden = new Float32Array(32);
-  const dirs = state.data.dirs;
-  for (let i = 0; i < dirs.length && i < hidden.length; i++) {
-    hidden[i] = state.hiddenDirs.has(dirs[i].name) ? 1 : 0;
-  }
-  gl.viewport(0, 0, glCanvas.width, glCanvas.height);
-  gl.clearColor(0, 0, 0, 1);
-  gl.clear(gl.COLOR_BUFFER_BIT);
-  gl.enable(gl.BLEND);
-  gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
-  gl.useProgram(layer.program);
-  gl.bindVertexArray(layer.vao);
-  gl.uniform2f(layer.uResolution, innerWidth, innerHeight);
-  gl.uniform3f(layer.uTransform, state.transform.x, state.transform.y, state.transform.k);
-  gl.uniform1f(layer.uDpr, state.dpr);
-  gl.uniform1f(layer.uBasePoint, NODE_R_SCREEN * Math.pow(state.transform.k, 0.4));
-  gl.uniform1fv(layer.uHidden, hidden);
-  gl.drawArrays(gl.POINTS, 0, layer.count);
-  gl.bindVertexArray(null);
-}
-
 // 远视图：25 学科聚合块 + 学科间依赖（小圆大陆样式）
 function drawDirLevel(vLeft, vRight, vTop, vBottom, k) {
   const dirs = state.data.dirs;
   const maxW = Math.max(1, ...state.dirEdges.map((e) => e.w));
   for (const e of state.dirEdges) {
     const a = dirs[e.s], b = dirs[e.t];
-    if (state.hiddenDirs.has(a.name) || state.hiddenDirs.has(b.name)) continue;
+    if (!dirVisible(a) || !dirVisible(b)) continue;
     const f = e.w / maxW;
     ctx.strokeStyle = `rgba(${EDGE_COLOR},${0.07 + 0.22 * f})`;   // 不悬停一律灰
     ctx.lineWidth = Math.max(0.5, 2.0 * f) / k;
     ctx.beginPath(); ctx.moveTo(a.cx, a.cy); ctx.lineTo(b.cx, b.cy); ctx.stroke();
   }
   for (const d of dirs) {
-    if (state.hiddenDirs.has(d.name)) continue;
+    if (!dirVisible(d)) continue;
     const r = (14 + Math.sqrt(d.count) * 1.4) / k;
     if (d.cx < vLeft - r || d.cx > vRight + r || d.cy < vTop - r || d.cy > vBottom + r) continue;
     const info = state.dirColor.get(d.name);
@@ -825,11 +786,12 @@ function drawDirLevel(vLeft, vRight, vTop, vBottom, k) {
   }
 }
 
-// 声明网络视图：灰边 + 清晰节点（全矢量绘制，无模糊栅格）
+// 声明网络视图：默认边和节点由 WebGL 绘制；Canvas 只保留标签/hover 层。
 function drawCrisp(vLeft, vRight, vTop, vBottom, k) {
-  drawEdgesLive(vLeft, vRight, vTop, vBottom, k);
-  if (state.glNodes) collectVisibleNodes(k);
-  else drawCrispNodes(k);
+  collectVisibleNodes(k);
+  if (!state.glRenderer.supported) {
+    drawEdgesLive(vLeft, vRight, vTop, vBottom, k);
+  }
   drawNetworkDirLabels(k);
   if (k >= LABEL_K) drawCrispLabels(k);
 }
@@ -887,9 +849,34 @@ function collectVisibleNodes(k) {
   const { x, y } = state.transform;
   const list = state.listPool;
   list.length = 0;
-  const gx0 = Math.floor(-x / k / GRID_CELL), gx1 = Math.floor((innerWidth - x) / k / GRID_CELL);
-  const gy0 = Math.floor(-y / k / GRID_CELL), gy1 = Math.floor((innerHeight - y) / k / GRID_CELL);
   const cap = k >= 18 ? 3500 : 1200;
+  const margin = CULL_MARGIN / k;
+  const left = -x / k - margin;
+  const right = (innerWidth - x) / k + margin;
+  const top = -y / k - margin;
+  const bottom = (innerHeight - y) / k + margin;
+
+  if (state.wasmIndex) {
+    const out = state.wasmIndex.filterVisible({
+      left,
+      right,
+      top,
+      bottom,
+      cap,
+      dirs,
+      hiddenDirs: state.hiddenDirs,
+    });
+    for (let i = 0; i < out.length; i++) list.push(out[i]);
+    for (let i = list.length - 1; i >= 0; i--) {
+      if (!nodeVisible(list[i])) list.splice(i, 1);
+    }
+    if (state.hover >= 0 && !list.includes(state.hover)) list.push(state.hover);
+    state.drawnList = list;
+    return;
+  }
+
+  const gx0 = Math.floor(left / GRID_CELL), gx1 = Math.floor(right / GRID_CELL);
+  const gy0 = Math.floor(top / GRID_CELL), gy1 = Math.floor(bottom / GRID_CELL);
 
   outer:
   for (let gy = gy0; gy <= gy1; gy++) {
@@ -897,7 +884,7 @@ function collectVisibleNodes(k) {
       const bucket = state.hoverGrid.get(gx + ',' + gy);
       if (!bucket) continue;
       for (const i of bucket) {
-        if (state.hiddenDirs.has(dirs[state.nodeDirIdx[i]].name)) continue;
+        if (!nodeVisible(i)) continue;
         const sx = xs[i] * k + x, sy = ys[i] * k + y;
         if (sx < 0 || sx >= innerWidth || sy < 0 || sy >= innerHeight) continue;
         list.push(i);
@@ -907,92 +894,6 @@ function collectVisibleNodes(k) {
   }
 
   if (state.hover >= 0 && !list.includes(state.hover)) list.push(state.hover);
-  state.drawnList = list;
-}
-
-// 高保真节点：遍历视口覆盖的世界格（空间索引），每格只留 1 个节点 →
-// 每帧只处理视口内节点（几万），不再全量扫 15 万；屏幕格位图去重（复用，无 GC）。
-function drawCrispNodes(k) {
-  const { nodes, dirs } = state.data;
-  const xs = nodes.x, ys = nodes.y;
-  const { x, y } = state.transform;
-  const deepZoom = k >= 18;
-  const screenCell = deepZoom ? 4 : SCREEN_CELL;
-  const cols = Math.ceil(innerWidth / screenCell);
-  const rows = Math.ceil(innerHeight / screenCell);
-  const need = cols * rows;
-  if (state.visited.length < need) state.visited = new Uint8Array(need);
-  const visited = state.visited;
-  visited.fill(0, 0, need);
-  const perDir = state.perDirPool;
-  for (let di = 0; di < dirs.length; di++) perDir[di].length = 0;
-  const list = state.listPool;
-  list.length = 0;
-  let drawn = 0;
-  const cellCap = deepZoom ? Math.min(MAX_DRAWN_DEEP, need) : Math.min(MAX_DRAWN, need);
-
-  // 视口覆盖的世界格范围（hoverGrid 空间索引）
-  const gx0 = Math.floor(-x / k / GRID_CELL), gx1 = Math.floor((innerWidth - x) / k / GRID_CELL);
-  const gy0 = Math.floor(-y / k / GRID_CELL), gy1 = Math.floor((innerHeight - y) / k / GRID_CELL);
-
-  outer:
-  for (let gy = gy0; gy <= gy1; gy++) {
-    for (let gx = gx0; gx <= gx1; gx++) {
-      const bucket = state.hoverGrid.get(gx + ',' + gy);
-      if (!bucket) continue;
-      for (const i of bucket) {
-        const sx = xs[i] * k + x, sy = ys[i] * k + y;
-        if (sx < 0 || sx >= innerWidth || sy < 0 || sy >= innerHeight) continue;
-        const sgx = (sx / screenCell) | 0, sgy = (sy / screenCell) | 0;
-        const key = sgy * cols + sgx;
-        if (visited[key]) continue;
-        visited[key] = 1;
-        perDir[state.nodeDirIdx[i]].push(i);
-        list.push(i);
-        if (++drawn >= cellCap) break outer;
-      }
-    }
-  }
-
-  // 悬停节点强制入列，保证可见
-  if (state.hover >= 0 && !list.includes(state.hover)) {
-    perDir[state.nodeDirIdx[state.hover]].push(state.hover);
-    list.push(state.hover);
-  }
-
-  const baseR = nodeR(k);
-  const sqrtMax = Math.sqrt(state.maxDegree);
-  ctx.save();
-  ctx.globalCompositeOperation = 'lighter';
-  for (let di = 0; di < dirs.length; di++) {
-    if (state.hiddenDirs.has(dirs[di].name)) continue;
-    const arr = perDir[di];
-    if (!arr.length) continue;
-    const info = state.dirColor.get(dirs[di].name);
-
-    // Subtle bloom only for important nodes. Large per-node translucent halos
-    // look blobby at map scale, so most nodes stay as crisp solid dots.
-    ctx.fillStyle = `rgba(${info.rgb},0.12)`;
-    ctx.beginPath();
-    for (const i of arr) {
-      const degreeWeight = Math.sqrt(state.degrees[i]) / sqrtMax;
-      if (degreeWeight < 0.28) continue;
-      const r = baseR * (1.35 + 2.0 * degreeWeight);
-      ctx.moveTo(xs[i] + r, ys[i]);                   // 圆（无方角），moveTo 避免 arc 间连线
-      ctx.arc(xs[i], ys[i], r, 0, Math.PI * 2);
-    }
-    ctx.fill();
-
-    ctx.fillStyle = info.color;
-    ctx.beginPath();
-    for (const i of arr) {
-      const r = visualNodeRadius(i, k);
-      ctx.moveTo(xs[i] + r, ys[i]);
-      ctx.arc(xs[i], ys[i], r, 0, Math.PI * 2);
-    }
-    ctx.fill();
-  }
-  ctx.restore();
   state.drawnList = list;
 }
 
@@ -1008,15 +909,41 @@ function drawNetworkDirLabels(k) {
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.lineJoin = 'round';
-  for (const d of state.dirCenters) {
-    if (!NETWORK_LABELS.has(d.name) || state.hiddenDirs.has(d.name)) continue;
-    const fontSize = Math.min(28, Math.max(13, 12 + Math.log10(d.count + 1) * 3.6)) / k;
-    ctx.font = `600 ${fontSize}px "Segoe UI","Microsoft YaHei",sans-serif`;
+  const visible = state.dirCenters
+    .filter((d) => NETWORK_LABELS.has(d.name) && dirVisible(d))
+    .sort((a, b) => b.count - a.count);
+  const maxCount = Math.max(1, ...visible.map((d) => d.count || 0));
+  const occupied = [];
+
+  for (const d of visible) {
+    const weight = Math.log1p(d.count || 1) / Math.log1p(maxCount);
+    const screenFont = Math.round(11 + weight * 4);
+    const worldFont = screenFont / k;
+    ctx.font = `600 ${worldFont}px "Segoe UI","Microsoft YaHei",sans-serif`;
+    const sx = d.x * k + state.transform.x;
+    const y = d.y - (13 + weight * 6) / k;
+    const sy = y * k + state.transform.y;
+    const width = ctx.measureText(d.name).width * k;
+    const rect = {
+      x1: sx - width / 2 - 4,
+      y1: sy - screenFont * 0.52 - 2,
+      x2: sx + width / 2 + 4,
+      y2: sy + screenFont * 0.52 + 2,
+    };
+    let overlaps = 0;
+    for (const r of occupied) {
+      if (rect.x1 < r.x2 && rect.x2 > r.x1 && rect.y1 < r.y2 && rect.y2 > r.y1) {
+        overlaps++;
+      }
+    }
+    if (overlaps > 2 && k < 1.35) continue;
+    occupied.push(rect);
+
     ctx.strokeStyle = 'rgba(0,0,0,0.92)';
-    ctx.lineWidth = 4.8 / k;
-    ctx.strokeText(d.name, d.x, d.y - 18 / k);
-    ctx.fillStyle = 'rgba(235,238,245,0.88)';
-    ctx.fillText(d.name, d.x, d.y - 18 / k);
+    ctx.lineWidth = 3.8 / k;
+    ctx.strokeText(d.name, d.x, y);
+    ctx.fillStyle = `rgba(235,238,245,${0.78 + weight * 0.16})`;
+    ctx.fillText(d.name, d.x, y);
   }
   ctx.restore();
 }
@@ -1076,13 +1003,13 @@ function drawAxes(k) {
   ctx.fillStyle = '#e6edf3';
   ctx.font = '14px "Segoe UI","Microsoft YaHei",sans-serif';
   ctx.textAlign = 'center'; ctx.textBaseline = 'top';
-  ctx.fillText('Subject clusters ordered by first mathlib entry time', (left + right) / 2, axisY + 10);
+  ctx.fillText('Construction Timeline', (left + right) / 2, axisY + 10);
   ctx.fillStyle = '#8b949e';
   ctx.font = '12px "Segoe UI",sans-serif';
   ctx.textAlign = 'left';
-  ctx.fillText(`${m.yearMin}`, left, axisY + 10);
+  ctx.fillText('Primitives', left, axisY + 10);
   ctx.textAlign = 'right';
-  ctx.fillText(`${m.yearMax}`, right, axisY + 10);
+  ctx.fillText('Constructs', right, axisY + 10);
 
   const axisX = left - 26;
   ctx.fillStyle = '#e6edf3';
@@ -1113,9 +1040,9 @@ function drawHover(k) {
   ctx.save();
   ctx.globalCompositeOperation = 'source-over';
 
-  // 1) 关联连线（细虚线，不做夸张光晕）
+  // 1) 关联连线（细实线，不做夸张光晕）
   for (const j of neigh) {
-    if (state.hiddenDirs.has(n.dir[j])) continue;
+    if (!nodeVisible(j)) continue;
     const x1 = xs[i], y1 = ys[i], x2 = xs[j], y2 = ys[j];
     let stroke;
     if (n.dir[j] === dirA) {
@@ -1129,7 +1056,7 @@ function drawHover(k) {
     }
     drawCurvedEdgePath(x1, y1, x2, y2, i, j);
     ctx.strokeStyle = stroke;
-    ctx.setLineDash([4 / k, 6 / k]);
+    ctx.setLineDash([]);
     ctx.lineWidth = 1.2 / k;
     ctx.globalAlpha = 0.58;
     ctx.stroke();
@@ -1138,7 +1065,7 @@ function drawHover(k) {
 
   // 2) 相关节点（保持正常大小，只提高可见度）
   for (const j of neigh) {
-    if (state.hiddenDirs.has(n.dir[j])) continue;
+    if (!nodeVisible(j)) continue;
     const col = state.dirColor.get(n.dir[j]);
     const r = visualNodeRadius(j, k);
     ctx.beginPath(); ctx.arc(xs[j], ys[j], r, 0, Math.PI * 2);
@@ -1163,8 +1090,22 @@ function drawHover(k) {
 
   // 4) hover 信息
   $('hoverInfo').textContent =
-    `${n.label[i]} · ${n.kind[i]} · ${n.module[i]} · ${dirA} · ${n.year[i].toFixed(1)} · depth ${(n.depth[i] * 100).toFixed(0)} · ${neigh.length} links`;
+    hoverSummary(i, neigh.length);
   $('hoverInfo').style.color = colorA.color;
+}
+
+function hoverSummary(i, links) {
+  const n = state.data.nodes;
+  const parts = [
+    n.label[i],
+    n.kind[i],
+    n.module[i],
+    n.dir[i],
+    `${Number(n.year[i]).toFixed(1)}`,
+    `depth ${(n.depth[i] * 100).toFixed(0)}`,
+    `${links} links`,
+  ];
+  return parts.filter(Boolean).join(' · ');
 }
 
 // ---- 图例 ----
