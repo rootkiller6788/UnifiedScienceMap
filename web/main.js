@@ -143,7 +143,7 @@ async function init() {
     if (!res.ok) throw new Error('HTTP ' + res.status);
     state.data = await res.json();
   } catch (err) {
-    showToast('加载 decls.json 失败：' + err.message);
+    showToast('Failed to load decls.json: ' + err.message);
     return;
   }
   buildGraph();
@@ -660,7 +660,7 @@ function setupUI() {
   $('btnHudToggle').onclick = () => {
     const collapsed = $('hud').classList.toggle('collapsed');
     $('btnHudToggle').textContent = collapsed ? '+' : '−';
-    $('btnHudToggle').title = collapsed ? '展开图例面板' : '收起图例面板';
+    $('btnHudToggle').title = collapsed ? 'Show legend' : 'Hide legend';
   };
   $('search').addEventListener('input', (e) => onSearch(e.target.value));
   canvas.addEventListener('mousemove', onMouseMove);
@@ -683,9 +683,9 @@ function onSearch(q) {
   if (match >= 0) {
     if (state.mode !== 'network') { state.mode = 'network'; $('btnNetwork').classList.add('active'); $('btnOverview').classList.remove('active'); }
     state.hover = match;
-    $('searchHint').textContent = `匹配 ${count}+ 个声明，跳到第一个`;
+    $('searchHint').textContent = `Found ${count}+ matches; showing the first`;
     flyToNode(match);
-  } else { $('searchHint').textContent = '无匹配'; state.hover = -1; }
+  } else { $('searchHint').textContent = 'No matches'; state.hover = -1; }
   requestRender();
 }
 
@@ -1170,7 +1170,7 @@ function drawHover(k) {
 // ---- 图例 ----
 function buildLegend() {
   const el = $('legend');
-  el.innerHTML = '<div style="font-weight:600;margin-bottom:4px;color:var(--muted);">学科图例（点击开关）</div>';
+  el.innerHTML = '<div style="font-weight:600;margin-bottom:4px;color:var(--muted);">Subjects (click to toggle)</div>';
   const dirs = [...state.data.dirs].sort((a, b) => b.count - a.count);
   for (const d of dirs) {
     const row = document.createElement('div');
