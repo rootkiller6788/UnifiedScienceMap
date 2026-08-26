@@ -15,7 +15,7 @@ import { select } from 'https://cdn.jsdelivr.net/npm/d3-selection@3/+esm';
 const LOD_K = 3.0;             // 模式由按钮切换；该值仅作搜索定位的放大目标缩放
 const LABEL_K = 8.0;           // 缩放 ≥ 该值显示声明名标签
 const NODE_R_SCREEN = 2.2;     // 节点基准屏幕半径
-const EDGE_ALPHA = 0.13;       // 默认边（灰）透明度
+const EDGE_ALPHA = 0.055;      // 默认边透明度，网络模式走暗色荧光风格
 const EDGE_COLOR = '150,160,180';
 const CULL_MARGIN = 60;
 const WORLD_W = 1600;
@@ -25,6 +25,7 @@ const SCREEN_CELL = 20;        // 高保真节点屏幕密度限流单元（屏�
 const MAX_DRAWN = 8000;        // 每帧最多绘制的高保真节点数
 const MAX_LABELS = 220;        // 每帧最多绘制的标签数
 const MAX_EDGES = 6000;        // 每帧最多 stroke 的可见边数（低缩放边太密时降噪+提速）
+const EDGE_CURVE = 0.16;
 
 // 整体模式（学科聚合）绘图范围：原始 1600×900 世界内的 plot 区 [70,1530]×[70,830]。
 const PLOT_OVERVIEW = { left: 70, right: 1530, top: 70, bottom: 830 };
@@ -68,6 +69,8 @@ const DIR_PALETTE = new Map(Object.entries({
 // k=1→2.2px，k=3→3.4px，k=8→5px，k=20→7.3px，k=40→9.7px
 const nodeR = (k) => NODE_R_SCREEN * Math.pow(k, 0.4) / k;
 
+const glCanvas = document.getElementById('glgraph');
+const gl = glCanvas?.getContext('webgl2', { antialias: true, alpha: false });
 const canvas = document.getElementById('graph');
 const ctx = canvas.getContext('2d');
 const $ = (id) => document.getElementById(id);
@@ -94,6 +97,7 @@ const state = {
   hover: -1,
   hiddenDirs: new Set(),
   dpr: 1,
+  glNodes: null,
 };
 
 // ---- 初始化 ----
@@ -120,6 +124,13 @@ async function init() {
 
 function resize() {
   state.dpr = Math.min(window.devicePixelRatio || 1, 2);
+  if (glCanvas) {
+    glCanvas.width = Math.floor(innerWidth * state.dpr);
+    glCanvas.height = Math.floor(innerHeight * state.dpr);
+    glCanvas.style.width = innerWidth + 'px';
+    glCanvas.style.height = innerHeight + 'px';
+    if (gl) gl.viewport(0, 0, glCanvas.width, glCanvas.height);
+  }
   canvas.width = Math.floor(innerWidth * state.dpr);
   canvas.height = Math.floor(innerHeight * state.dpr);
   canvas.style.width = innerWidth + 'px';
@@ -564,17 +575,46 @@ function drawEdgesLive(vLeft, vRight, vTop, vBottom, k) {
   const xs = state.data.nodes.x, ys = state.data.nodes.y;
   const m = CULL_MARGIN / k;
   const sLeft = vLeft - m, sRight = vRight + m, sTop = vTop - m, sBot = vBottom + m;
-  ctx.beginPath();
   let cnt = 0;
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
   for (const [s, t] of state.data.edges) {
     const x1 = xs[s], y1 = ys[s], x2 = xs[t], y2 = ys[t];
     if ((x1 < sLeft && x2 < sLeft) || (x1 > sRight && x2 > sRight) || (y1 < sTop && y2 < sTop) || (y1 > sBot && y2 > sBot)) continue;
-    ctx.moveTo(x1, y1); ctx.lineTo(x2, y2);
+    const a = state.dirColor.get(state.data.nodes.dir[s]);
+    const b = state.dirColor.get(state.data.nodes.dir[t]);
+    const same = state.data.nodes.dir[s] === state.data.nodes.dir[t];
+    drawCurvedEdgePath(x1, y1, x2, y2, s, t);
+    ctx.strokeStyle = same ? `rgba(${a.rgb},${EDGE_ALPHA})` : `rgba(${b.rgb},${EDGE_ALPHA * 0.72})`;
+    ctx.lineWidth = 0.72 / k;
+    ctx.setLineDash(edgeDash(x1, y1, x2, y2, k));
+    ctx.lineDashOffset = -((performance.now() * 0.006 + (s % 23)) / k);
+    ctx.stroke();
     if (++cnt >= MAX_EDGES) break;
   }
-  ctx.strokeStyle = `rgba(${EDGE_COLOR},${EDGE_ALPHA})`;
-  ctx.lineWidth = 1 / k;
-  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.restore();
+}
+
+function drawCurvedEdgePath(x1, y1, x2, y2, seedA, seedB) {
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const len = Math.hypot(dx, dy) || 1;
+  const bendSeed = hash01(seedA + ':' + seedB) - 0.5;
+  const bend = Math.min(90, Math.max(14, len * EDGE_CURVE)) * (bendSeed < 0 ? -1 : 1);
+  const cx = (x1 + x2) / 2 - dy / len * bend;
+  const cy = (y1 + y2) / 2 + dx / len * bend;
+  ctx.beginPath();
+  ctx.moveTo(x1, y1);
+  ctx.quadraticCurveTo(cx, cy, x2, y2);
+}
+
+function edgeDash(x1, y1, x2, y2, k) {
+  const len = Math.hypot(x2 - x1, y2 - y1);
+  const scale = 1 / Math.max(0.7, k);
+  if (len < 55) return [2.2 * scale, 7.5 * scale];
+  if (len < 160) return [4 * scale, 11 * scale];
+  return [6 * scale, 15 * scale];
 }
 
 // 高保真节点：遍历视口覆盖的世界格（空间索引），每格只留 1 个节点 →
