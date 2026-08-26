@@ -2,6 +2,7 @@
 // 数据 decls.json（列式 SoA）：nodes.label/kind/dir/module/depth/x/y + edges + dirs。
 //   X = 数学形式化时间（模块首次进库，2021→2026）
 //   Y = 0.7·社区深度 + 0.2·模块深度 + 0.05·类型权重 + 0.05·局部扰动（基础低、构造高）
+// 网络模式另做轴向重映射（NET_PLOT）：只纵向压缩（横向不变），让学科簇变扁呈横向长条（整体模式不变）。
 // LOD：两种干净模式——远视图画 25 学科聚合块；放大后全矢量绘制声明网络（无模糊栅格）。
 // 性能：空间索引（hover 查邻居 + 节点视口裁剪都 O(视口内) 而非 O(n)）；邻接表 O(deg)；
 //      屏幕格位图去重 + 复用数组（无每帧 GC）；15 万节点任意缩放流畅。
@@ -24,6 +25,16 @@ const SCREEN_CELL = 20;        // 高保真节点屏幕密度限流单元（屏�
 const MAX_DRAWN = 8000;        // 每帧最多绘制的高保真节点数
 const MAX_LABELS = 220;        // 每帧最多绘制的标签数
 const MAX_EDGES = 6000;        // 每帧最多 stroke 的可见边数（低缩放边太密时降噪+提速）
+
+// 整体模式（学科聚合）绘图范围：原始 1600×900 世界内的 plot 区 [70,1530]×[70,830]。
+const PLOT_OVERVIEW = { left: 70, right: 1530, top: 70, bottom: 830 };
+// 网络模式（声明网络）绘图范围：横向保持原始范围不变，只纵向压缩（Y 压成一条横带），
+// 让每个学科簇从「竖向长条」变成「横向长条」。只改纵轴刻度/范围，不改横轴与相对次序。
+const NET_PLOT = { left: 70, right: 1530, top: 330, bottom: 570 };
+const NET_CLUSTER_PULL_X = 0.58;
+const NET_CLUSTER_PULL_Y = 0.66;
+const NET_FIT_WORLD = { left: 110, right: 1490, top: 265, bottom: 635 };
+const NET_DEFAULT_ZOOM = 1.196;
 
 const DIR_PALETTE = new Map(Object.entries({
   Algebra: '#ffff00',
@@ -69,6 +80,8 @@ const state = {
   degrees: null,            // Int32Array
   maxDegree: 1,
   dirEdges: [],             // 学科间聚合边 [{s,t,w}]
+  dirCenters: [],           // 网络模式压缩后的学科标签中心
+  networkBounds: null,      // 网络模式真实节点范围
   drawnList: [],            // 本帧实际绘制的高保真节点（标签/悬停用）
   hoverGrid: new Map(),     // 'cx,cy' -> [节点索引]（空间索引，桶内按度降序）
   adj: null,                // 邻接表（hover 查邻居 O(deg)，不再全量扫边）
@@ -173,6 +186,9 @@ function buildGraph() {
     return { s: a, t: b, w };
   });
 
+  applyNetLayout();   // 网络模式轴向重映射（只纵向压缩；整体模式用 dirs.cx/cy，不受影响）
+  computeDirCenters();
+  computeNetworkBounds();
   buildHoverGrid();   // 空间索引（桶内已按度降序，替代全局 degreeOrder）
 }
 
@@ -194,6 +210,72 @@ function hslToRgb(h) {
   else if (h < 300) { r = x; b = c; }
   else { r = c; b = x; }
   return `${Math.round((r + m) * 255)},${Math.round((g + m) * 255)},${Math.round((b + m) * 255)}`;
+}
+
+// 网络模式：把节点坐标从原始 plot 线性重映射到 NET_PLOT（横向不变、纵向压缩）。
+// 只改纵轴度量/范围，不改相对次序；整体模式的学科圆圈用 dirs.cx/cy（未改），故不受影响。
+function applyNetLayout() {
+  const xs = state.data.nodes.x, ys = state.data.nodes.y;
+  const ox = PLOT_OVERVIEW.left, ow = PLOT_OVERVIEW.right - PLOT_OVERVIEW.left;
+  const oy = PLOT_OVERVIEW.top, oh = PLOT_OVERVIEW.bottom - PLOT_OVERVIEW.top;
+  const nw = NET_PLOT.right - NET_PLOT.left, nh = NET_PLOT.bottom - NET_PLOT.top;
+  for (let i = 0; i < xs.length; i++) {
+    xs[i] = NET_PLOT.left + (xs[i] - ox) / ow * nw;
+    ys[i] = NET_PLOT.top + (ys[i] - oy) / oh * nh;
+  }
+  softenNetworkSeparation();
+}
+
+function softenNetworkSeparation() {
+  const { nodes } = state.data;
+  const centerX = (NET_PLOT.left + NET_PLOT.right) / 2;
+  const centerY = (NET_PLOT.top + NET_PLOT.bottom) / 2;
+  for (let i = 0; i < nodes.x.length; i++) {
+    const hash = hash01(nodes.label[i] + nodes.module[i]);
+    const hash2 = hash01(nodes.module[i] + nodes.label[i]);
+    const waveX = (hash - 0.5) * 70;
+    const waveY = (hash2 - 0.5) * 42;
+    nodes.x[i] = centerX + (nodes.x[i] - centerX) * NET_CLUSTER_PULL_X + waveX;
+    nodes.y[i] = centerY + (nodes.y[i] - centerY) * NET_CLUSTER_PULL_Y + waveY + Math.sin(nodes.x[i] * 0.025 + hash * 6.28) * 16;
+  }
+}
+
+function hash01(s) {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return (h >>> 0) / 4294967295;
+}
+
+function computeDirCenters() {
+  const { nodes, dirs } = state.data;
+  const sums = Array.from({ length: dirs.length }, () => ({ x: 0, y: 0, n: 0 }));
+  for (let i = 0; i < nodes.x.length; i++) {
+    const s = sums[state.nodeDirIdx[i]];
+    s.x += nodes.x[i];
+    s.y += nodes.y[i];
+    s.n++;
+  }
+  state.dirCenters = sums.map((s, i) => ({
+    name: dirs[i].name,
+    x: s.n ? s.x / s.n : dirs[i].cx,
+    y: s.n ? s.y / s.n : dirs[i].cy,
+    count: dirs[i].count,
+  }));
+}
+
+function computeNetworkBounds() {
+  const { x: xs, y: ys } = state.data.nodes;
+  let left = Infinity, right = -Infinity, top = Infinity, bottom = -Infinity;
+  for (let i = 0; i < xs.length; i++) {
+    if (xs[i] < left) left = xs[i];
+    if (xs[i] > right) right = xs[i];
+    if (ys[i] < top) top = ys[i];
+    if (ys[i] > bottom) bottom = ys[i];
+  }
+  state.networkBounds = { left, right, top, bottom };
 }
 
 // hover 空间网格：cell -> [节点索引]，hover 只查指针附近 3×3 格。
