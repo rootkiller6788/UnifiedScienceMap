@@ -23,6 +23,7 @@ const WORLD_H = 900;
 const GRID_CELL = 26;          // hover 空间网格单元（世界像素）
 const SCREEN_CELL = 20;        // 高保真节点屏幕密度限流单元（屏幕像素）
 const MAX_DRAWN = 8000;        // 每帧最多绘制的高保真节点数
+const MAX_DRAWN_DEEP = 50000;
 const MAX_LABELS = 220;        // 每帧最多绘制的标签数
 const MAX_EDGES = 6000;        // 每帧最多 stroke 的可见边数（低缩放边太密时降噪+提速）
 const EDGE_CURVE = 0.16;
@@ -98,6 +99,7 @@ const state = {
   hiddenDirs: new Set(),
   dpr: 1,
   glNodes: null,
+  glEdges: null,
 };
 
 // ---- 初始化 ----
@@ -205,7 +207,202 @@ function buildGraph() {
   applyNetLayout();   // 网络模式轴向重映射（只纵向压缩；整体模式用 dirs.cx/cy，不受影响）
   computeDirCenters();
   computeNetworkBounds();
+  initGlNodes();
+  initGlEdges();
   buildHoverGrid();   // 空间索引（桶内已按度降序，替代全局 degreeOrder）
+}
+
+function initGlNodes() {
+  if (!gl) return;
+  const { nodes } = state.data;
+  const n = nodes.x.length;
+  const stride = 7;
+  const data = new Float32Array(n * stride);
+  const sqrtMax = Math.sqrt(state.maxDegree);
+  for (let i = 0; i < n; i++) {
+    const rgb = parseRgb(state.dirColor.get(nodes.dir[i]).rgb);
+    const o = i * stride;
+    data[o] = nodes.x[i];
+    data[o + 1] = nodes.y[i];
+    data[o + 2] = rgb[0] / 255;
+    data[o + 3] = rgb[1] / 255;
+    data[o + 4] = rgb[2] / 255;
+    data[o + 5] = Math.sqrt(state.degrees[i]) / sqrtMax;
+    data[o + 6] = state.nodeDirIdx[i];
+  }
+
+  const program = createGlProgram(NODE_VERTEX_SHADER, NODE_FRAGMENT_SHADER);
+  if (!program) return;
+  const vao = gl.createVertexArray();
+  const buffer = gl.createBuffer();
+  gl.bindVertexArray(vao);
+  gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+  gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+  bindGlAttrib(program, 'a_pos', 2, stride, 0);
+  bindGlAttrib(program, 'a_color', 3, stride, 2);
+  bindGlAttrib(program, 'a_degree', 1, stride, 5);
+  bindGlAttrib(program, 'a_dir', 1, stride, 6);
+  gl.bindVertexArray(null);
+
+  state.glNodes = {
+    program,
+    vao,
+    count: n,
+    uResolution: gl.getUniformLocation(program, 'u_resolution'),
+    uTransform: gl.getUniformLocation(program, 'u_transform'),
+    uDpr: gl.getUniformLocation(program, 'u_dpr'),
+    uBasePoint: gl.getUniformLocation(program, 'u_basePoint'),
+    uHidden: gl.getUniformLocation(program, 'u_hidden'),
+  };
+}
+
+function initGlEdges() {
+  if (!gl) return;
+  const { nodes, edges } = state.data;
+  const stride = 7;
+  const data = new Float32Array(edges.length * 2 * stride);
+  for (let ei = 0; ei < edges.length; ei++) {
+    const [s, t] = edges[ei];
+    const colorA = parseRgb(state.dirColor.get(nodes.dir[s]).rgb);
+    const colorB = parseRgb(state.dirColor.get(nodes.dir[t]).rgb);
+    writeGlEdgeVertex(data, ei * 2 * stride, nodes.x[s], nodes.y[s], colorA, state.nodeDirIdx[s], state.nodeDirIdx[t]);
+    writeGlEdgeVertex(data, (ei * 2 + 1) * stride, nodes.x[t], nodes.y[t], colorB, state.nodeDirIdx[s], state.nodeDirIdx[t]);
+  }
+
+  const program = createGlProgram(EDGE_VERTEX_SHADER, EDGE_FRAGMENT_SHADER);
+  if (!program) return;
+  const vao = gl.createVertexArray();
+  const buffer = gl.createBuffer();
+  gl.bindVertexArray(vao);
+  gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+  gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+  bindGlAttrib(program, 'a_pos', 2, stride, 0);
+  bindGlAttrib(program, 'a_color', 3, stride, 2);
+  bindGlAttrib(program, 'a_dirA', 1, stride, 5);
+  bindGlAttrib(program, 'a_dirB', 1, stride, 6);
+  gl.bindVertexArray(null);
+
+  state.glEdges = {
+    program,
+    vao,
+    count: edges.length * 2,
+    uResolution: gl.getUniformLocation(program, 'u_resolution'),
+    uTransform: gl.getUniformLocation(program, 'u_transform'),
+    uHidden: gl.getUniformLocation(program, 'u_hidden'),
+  };
+}
+
+function writeGlEdgeVertex(data, offset, x, y, rgb, dirA, dirB) {
+  data[offset] = x;
+  data[offset + 1] = y;
+  data[offset + 2] = rgb[0] / 255;
+  data[offset + 3] = rgb[1] / 255;
+  data[offset + 4] = rgb[2] / 255;
+  data[offset + 5] = dirA;
+  data[offset + 6] = dirB;
+}
+
+const NODE_VERTEX_SHADER = `#version 300 es
+precision highp float;
+in vec2 a_pos;
+in vec3 a_color;
+in float a_degree;
+in float a_dir;
+uniform vec2 u_resolution;
+uniform vec3 u_transform;
+uniform float u_dpr;
+uniform float u_basePoint;
+uniform float u_hidden[32];
+out vec3 v_color;
+out float v_hidden;
+void main() {
+  vec2 screen = a_pos * u_transform.z + u_transform.xy;
+  vec2 clip = (screen / u_resolution) * 2.0 - 1.0;
+  gl_Position = vec4(clip.x, -clip.y, 0.0, 1.0);
+  gl_PointSize = u_dpr * u_basePoint * (0.68 + 1.15 * a_degree);
+  v_color = a_color;
+  v_hidden = u_hidden[int(a_dir + 0.5)];
+}`;
+
+const NODE_FRAGMENT_SHADER = `#version 300 es
+precision highp float;
+in vec3 v_color;
+in float v_hidden;
+out vec4 outColor;
+void main() {
+  if (v_hidden > 0.5) discard;
+  vec2 p = gl_PointCoord * 2.0 - 1.0;
+  float d = dot(p, p);
+  if (d > 1.0) discard;
+  float core = smoothstep(1.0, 0.12, d);
+  float edge = smoothstep(1.0, 0.76, d) * 0.22;
+  outColor = vec4(v_color, max(core, edge));
+}`;
+
+const EDGE_VERTEX_SHADER = `#version 300 es
+precision highp float;
+in vec2 a_pos;
+in vec3 a_color;
+in float a_dirA;
+in float a_dirB;
+uniform vec2 u_resolution;
+uniform vec3 u_transform;
+uniform float u_hidden[32];
+out vec3 v_color;
+out float v_hidden;
+void main() {
+  vec2 screen = a_pos * u_transform.z + u_transform.xy;
+  vec2 clip = (screen / u_resolution) * 2.0 - 1.0;
+  gl_Position = vec4(clip.x, -clip.y, 0.0, 1.0);
+  v_color = a_color;
+  v_hidden = max(u_hidden[int(a_dirA + 0.5)], u_hidden[int(a_dirB + 0.5)]);
+}`;
+
+const EDGE_FRAGMENT_SHADER = `#version 300 es
+precision highp float;
+in vec3 v_color;
+in float v_hidden;
+out vec4 outColor;
+void main() {
+  if (v_hidden > 0.5) discard;
+  outColor = vec4(v_color, 0.038);
+}`;
+
+function createGlProgram(vertexSource, fragmentSource) {
+  const vs = compileGlShader(gl.VERTEX_SHADER, vertexSource);
+  const fs = compileGlShader(gl.FRAGMENT_SHADER, fragmentSource);
+  if (!vs || !fs) return null;
+  const program = gl.createProgram();
+  gl.attachShader(program, vs);
+  gl.attachShader(program, fs);
+  gl.linkProgram(program);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+    showToast('WebGL program failed: ' + gl.getProgramInfoLog(program));
+    return null;
+  }
+  return program;
+}
+
+function compileGlShader(type, source) {
+  const shader = gl.createShader(type);
+  gl.shaderSource(shader, source);
+  gl.compileShader(shader);
+  if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+    showToast('WebGL shader failed: ' + gl.getShaderInfoLog(shader));
+    return null;
+  }
+  return shader;
+}
+
+function bindGlAttrib(program, name, size, stride, offsetFloats) {
+  const loc = gl.getAttribLocation(program, name);
+  if (loc < 0) return;
+  gl.enableVertexAttribArray(loc);
+  gl.vertexAttribPointer(loc, size, gl.FLOAT, false, stride * Float32Array.BYTES_PER_ELEMENT, offsetFloats * Float32Array.BYTES_PER_ELEMENT);
+}
+
+function parseRgb(rgb) {
+  return rgb.split(',').map((v) => Number(v.trim()));
 }
 
 function hexToRgb(hex) {
@@ -507,11 +704,13 @@ function requestRender() {
 function render() {
   const { dpr } = state;
   const w = innerWidth, h = innerHeight;
+  const aggregate = state.mode === 'overview';
+  if (glCanvas) glCanvas.style.display = aggregate ? 'none' : 'block';
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, w, h);
-  ctx.fillStyle = '#0d1117';
-  ctx.fillRect(0, 0, w, h);
+  if (aggregate || !state.glNodes) drawBackground(w, h);
   if (!state.data) return;
+  if (!aggregate && state.glNodes) renderGlNodes();
 
   const { x, y, k } = state.transform;
   const vLeft = -x / k, vRight = (w - x) / k, vTop = -y / k, vBottom = (h - y) / k;
@@ -520,16 +719,44 @@ function render() {
   ctx.scale(k, k);
 
   // 模式由按钮决定（不随缩放自动切），两种模式干净切换
-  const aggregate = state.mode === 'overview';
   if (aggregate) drawDirLevel(vLeft, vRight, vTop, vBottom, k);
   else drawCrisp(vLeft, vRight, vTop, vBottom, k);
   if (state.hover >= 0 && !aggregate) drawHover(k);
 
   ctx.restore();
 
-  drawAxes(k);
+  if (aggregate) drawAxes(k);
   $('nodeCount').textContent = state.data.meta.conceptCount.toLocaleString();
   $('edgeCount').textContent = state.data.meta.edgeCount.toLocaleString();
+}
+
+function drawBackground(w, h) {
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, w, h);
+}
+
+function renderGlNodes() {
+  const layer = state.glNodes;
+  if (!gl || !layer) return;
+  const hidden = new Float32Array(32);
+  const dirs = state.data.dirs;
+  for (let i = 0; i < dirs.length && i < hidden.length; i++) {
+    hidden[i] = state.hiddenDirs.has(dirs[i].name) ? 1 : 0;
+  }
+  gl.viewport(0, 0, glCanvas.width, glCanvas.height);
+  gl.clearColor(0, 0, 0, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+  gl.useProgram(layer.program);
+  gl.bindVertexArray(layer.vao);
+  gl.uniform2f(layer.uResolution, innerWidth, innerHeight);
+  gl.uniform3f(layer.uTransform, state.transform.x, state.transform.y, state.transform.k);
+  gl.uniform1f(layer.uDpr, state.dpr);
+  gl.uniform1f(layer.uBasePoint, NODE_R_SCREEN * Math.pow(state.transform.k, 0.4));
+  gl.uniform1fv(layer.uHidden, hidden);
+  gl.drawArrays(gl.POINTS, 0, layer.count);
+  gl.bindVertexArray(null);
 }
 
 // 远视图：25 学科聚合块 + 学科间依赖（小圆大陆样式）
@@ -566,7 +793,8 @@ function drawDirLevel(vLeft, vRight, vTop, vBottom, k) {
 // 声明网络视图：灰边 + 清晰节点（全矢量绘制，无模糊栅格）
 function drawCrisp(vLeft, vRight, vTop, vBottom, k) {
   drawEdgesLive(vLeft, vRight, vTop, vBottom, k);
-  drawCrispNodes(k);
+  if (state.glNodes) collectVisibleNodes(k);
+  else drawCrispNodes(k);
   if (k >= LABEL_K) drawCrispLabels(k);
 }
 
@@ -617,14 +845,45 @@ function edgeDash(x1, y1, x2, y2, k) {
   return [6 * scale, 15 * scale];
 }
 
+function collectVisibleNodes(k) {
+  const { nodes, dirs } = state.data;
+  const xs = nodes.x, ys = nodes.y;
+  const { x, y } = state.transform;
+  const list = state.listPool;
+  list.length = 0;
+  const gx0 = Math.floor(-x / k / GRID_CELL), gx1 = Math.floor((innerWidth - x) / k / GRID_CELL);
+  const gy0 = Math.floor(-y / k / GRID_CELL), gy1 = Math.floor((innerHeight - y) / k / GRID_CELL);
+  const cap = k >= 18 ? 3500 : 1200;
+
+  outer:
+  for (let gy = gy0; gy <= gy1; gy++) {
+    for (let gx = gx0; gx <= gx1; gx++) {
+      const bucket = state.hoverGrid.get(gx + ',' + gy);
+      if (!bucket) continue;
+      for (const i of bucket) {
+        if (state.hiddenDirs.has(dirs[state.nodeDirIdx[i]].name)) continue;
+        const sx = xs[i] * k + x, sy = ys[i] * k + y;
+        if (sx < 0 || sx >= innerWidth || sy < 0 || sy >= innerHeight) continue;
+        list.push(i);
+        if (list.length >= cap) break outer;
+      }
+    }
+  }
+
+  if (state.hover >= 0 && !list.includes(state.hover)) list.push(state.hover);
+  state.drawnList = list;
+}
+
 // 高保真节点：遍历视口覆盖的世界格（空间索引），每格只留 1 个节点 →
 // 每帧只处理视口内节点（几万），不再全量扫 15 万；屏幕格位图去重（复用，无 GC）。
 function drawCrispNodes(k) {
   const { nodes, dirs } = state.data;
   const xs = nodes.x, ys = nodes.y;
   const { x, y } = state.transform;
-  const cols = Math.ceil(innerWidth / SCREEN_CELL);
-  const rows = Math.ceil(innerHeight / SCREEN_CELL);
+  const deepZoom = k >= 18;
+  const screenCell = deepZoom ? 4 : SCREEN_CELL;
+  const cols = Math.ceil(innerWidth / screenCell);
+  const rows = Math.ceil(innerHeight / screenCell);
   const need = cols * rows;
   if (state.visited.length < need) state.visited = new Uint8Array(need);
   const visited = state.visited;
@@ -634,7 +893,7 @@ function drawCrispNodes(k) {
   const list = state.listPool;
   list.length = 0;
   let drawn = 0;
-  const cellCap = Math.min(MAX_DRAWN, need);
+  const cellCap = deepZoom ? Math.min(MAX_DRAWN_DEEP, need) : Math.min(MAX_DRAWN, need);
 
   // 视口覆盖的世界格范围（hoverGrid 空间索引）
   const gx0 = Math.floor(-x / k / GRID_CELL), gx1 = Math.floor((innerWidth - x) / k / GRID_CELL);
@@ -648,7 +907,7 @@ function drawCrispNodes(k) {
       for (const i of bucket) {
         const sx = xs[i] * k + x, sy = ys[i] * k + y;
         if (sx < 0 || sx >= innerWidth || sy < 0 || sy >= innerHeight) continue;
-        const sgx = (sx / SCREEN_CELL) | 0, sgy = (sy / SCREEN_CELL) | 0;
+        const sgx = (sx / screenCell) | 0, sgy = (sy / screenCell) | 0;
         const key = sgy * cols + sgx;
         if (visited[key]) continue;
         visited[key] = 1;
@@ -667,20 +926,44 @@ function drawCrispNodes(k) {
 
   const baseR = nodeR(k);
   const sqrtMax = Math.sqrt(state.maxDegree);
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
   for (let di = 0; di < dirs.length; di++) {
     if (state.hiddenDirs.has(dirs[di].name)) continue;
     const arr = perDir[di];
     if (!arr.length) continue;
-    ctx.fillStyle = state.dirColor.get(dirs[di].name).color;
+    const info = state.dirColor.get(dirs[di].name);
+
+    // Subtle bloom only for important nodes. Large per-node translucent halos
+    // look blobby at map scale, so most nodes stay as crisp solid dots.
+    ctx.fillStyle = `rgba(${info.rgb},0.12)`;
     ctx.beginPath();
     for (const i of arr) {
-      const r = baseR * (0.6 + 1.4 * Math.sqrt(state.degrees[i]) / sqrtMax);
+      const degreeWeight = Math.sqrt(state.degrees[i]) / sqrtMax;
+      if (degreeWeight < 0.28) continue;
+      const r = baseR * (1.35 + 2.0 * degreeWeight);
       ctx.moveTo(xs[i] + r, ys[i]);                   // 圆（无方角），moveTo 避免 arc 间连线
       ctx.arc(xs[i], ys[i], r, 0, Math.PI * 2);
     }
     ctx.fill();
+
+    ctx.fillStyle = info.color;
+    ctx.beginPath();
+    for (const i of arr) {
+      const r = visualNodeRadius(i, k);
+      ctx.moveTo(xs[i] + r, ys[i]);
+      ctx.arc(xs[i], ys[i], r, 0, Math.PI * 2);
+    }
+    ctx.fill();
   }
+  ctx.restore();
   state.drawnList = list;
+}
+
+function visualNodeRadius(i, k) {
+  const sqrtMax = Math.sqrt(state.maxDegree);
+  const degreeWeight = Math.sqrt(state.degrees[i]) / sqrtMax;
+  return nodeR(k) * (0.68 + 1.15 * degreeWeight);
 }
 
 // 声明名标签（限 MAX_LABELS 个，避免遮挡）
