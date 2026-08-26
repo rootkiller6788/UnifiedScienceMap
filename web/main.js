@@ -66,6 +66,35 @@ const DIR_PALETTE = new Map(Object.entries({
   Data: '#9a9a9a',
 }));
 
+const NETWORK_LABELS = new Set([
+  'Control',
+  'Combinatorics',
+  'InformationTheory',
+  'FieldTheory',
+  'GroupTheory',
+  'RingTheory',
+  'RepresentationTheory',
+  'ModelTheory',
+  'Algebra',
+  'NumberTheory',
+  'LinearAlgebra',
+  'AlgebraicGeometry',
+  'Geometry',
+  'Analysis',
+  'Condensed',
+  'MeasureTheory',
+  'Probability',
+  'Dynamics',
+  'Topology',
+  'AlgebraicTopology',
+  'CategoryTheory',
+  'Computability',
+  'SetTheory',
+  'Logic',
+  'Order',
+  'Data',
+]);
+
 // 节点世界半径：屏幕尺寸随缩放温和增长（放大视图节点也变大，而非恒定 2.2px 显得缩小）
 // k=1→2.2px，k=3→3.4px，k=8→5px，k=20→7.3px，k=40→9.7px
 const nodeR = (k) => NODE_R_SCREEN * Math.pow(k, 0.4) / k;
@@ -795,6 +824,7 @@ function drawCrisp(vLeft, vRight, vTop, vBottom, k) {
   drawEdgesLive(vLeft, vRight, vTop, vBottom, k);
   if (state.glNodes) collectVisibleNodes(k);
   else drawCrispNodes(k);
+  drawNetworkDirLabels(k);
   if (k >= LABEL_K) drawCrispLabels(k);
 }
 
@@ -964,6 +994,25 @@ function visualNodeRadius(i, k) {
   const sqrtMax = Math.sqrt(state.maxDegree);
   const degreeWeight = Math.sqrt(state.degrees[i]) / sqrtMax;
   return nodeR(k) * (0.68 + 1.15 * degreeWeight);
+}
+
+function drawNetworkDirLabels(k) {
+  if (k > 7.5) return;
+  ctx.save();
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.lineJoin = 'round';
+  for (const d of state.dirCenters) {
+    if (!NETWORK_LABELS.has(d.name) || state.hiddenDirs.has(d.name)) continue;
+    const fontSize = Math.min(28, Math.max(13, 12 + Math.log10(d.count + 1) * 3.6)) / k;
+    ctx.font = `600 ${fontSize}px "Segoe UI","Microsoft YaHei",sans-serif`;
+    ctx.strokeStyle = 'rgba(0,0,0,0.92)';
+    ctx.lineWidth = 4.8 / k;
+    ctx.strokeText(d.name, d.x, d.y - 18 / k);
+    ctx.fillStyle = 'rgba(235,238,245,0.88)';
+    ctx.fillText(d.name, d.x, d.y - 18 / k);
+  }
+  ctx.restore();
 }
 
 // 声明名标签（限 MAX_LABELS 个，避免遮挡）
