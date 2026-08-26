@@ -762,6 +762,12 @@ function render() {
 function drawBackground(w, h) {
   ctx.fillStyle = '#000';
   ctx.fillRect(0, 0, w, h);
+  const g = ctx.createRadialGradient(w * 0.52, h * 0.47, Math.min(w, h) * 0.08, w * 0.52, h * 0.47, Math.max(w, h) * 0.66);
+  g.addColorStop(0, 'rgba(18,22,28,0.38)');
+  g.addColorStop(0.58, 'rgba(2,4,7,0.08)');
+  g.addColorStop(1, 'rgba(0,0,0,0.85)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, w, h);
 }
 
 function renderGlNodes() {
@@ -1060,7 +1066,9 @@ function drawAxes(k) {
   ctx.translate(state.transform.x, state.transform.y);
   ctx.scale(state.transform.k, state.transform.k);
 
-  const left = 70, right = 1530, top = 70, bottom = 830;
+  // 坐标轴框架始终用整体模式的绘图范围（两种模式一致）；网络模式只压缩节点、不动坐标轴。
+  const p = PLOT_OVERVIEW;
+  const left = p.left, right = p.right, top = p.top, bottom = p.bottom;
   const axisY = bottom + 30;
   ctx.strokeStyle = 'rgba(230,237,243,0.35)';
   ctx.lineWidth = 1.2;
@@ -1068,7 +1076,7 @@ function drawAxes(k) {
   ctx.fillStyle = '#e6edf3';
   ctx.font = '14px "Segoe UI","Microsoft YaHei",sans-serif';
   ctx.textAlign = 'center'; ctx.textBaseline = 'top';
-  ctx.fillText(`学科簇 · 按首次进库时间排列 →（簇内左早右晚）`, (left + right) / 2, axisY + 10);
+  ctx.fillText('Subject clusters ordered by first mathlib entry time', (left + right) / 2, axisY + 10);
   ctx.fillStyle = '#8b949e';
   ctx.font = '12px "Segoe UI",sans-serif';
   ctx.textAlign = 'left';
@@ -1085,7 +1093,7 @@ function drawAxes(k) {
   ctx.translate(axisX, midY);
   ctx.rotate(-Math.PI / 2);
   ctx.textAlign = 'center';
-  ctx.fillText('结构深度（底=基础 → 顶=高级构造）', 0, 0);
+  ctx.fillText('Structural depth', 0, 0);
   ctx.restore();
 
   ctx.restore();
