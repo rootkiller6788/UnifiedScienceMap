@@ -341,10 +341,50 @@ function animateTransformTo(target, dur = 600) {
   tweenRAF = requestAnimationFrame(step);
 }
 
-function fitView(dur = 500) {
+// 当前模式的「世界」边界与中心：整体=1600×900；网络=纵向压缩后的 NET_PLOT 范围。
+function currentWorld() {
+  if (state.mode === 'overview') {
+    return { cx: WORLD_W / 2, cy: WORLD_H / 2, w: WORLD_W, h: WORLD_H };
+  }
+  if (state.networkBounds) {
+    const b = state.networkBounds;
+    const padX = 120, padY = 70;
+    return {
+      cx: (b.left + b.right) / 2,
+      cy: (b.top + b.bottom) / 2,
+      w: b.right - b.left + padX * 2,
+      h: b.bottom - b.top + padY * 2,
+    };
+  }
+  return {
+    cx: (NET_FIT_WORLD.left + NET_FIT_WORLD.right) / 2,
+    cy: (NET_FIT_WORLD.top + NET_FIT_WORLD.bottom) / 2,
+    w: NET_FIT_WORLD.right - NET_FIT_WORLD.left,
+    h: NET_FIT_WORLD.bottom - NET_FIT_WORLD.top,
+  };
+}
+
+// 最远视图缩放（缩放下限）：按当前模式的世界尺寸铺满屏。
+function currentFitK() {
+  const r = currentWorld();
+  const k = Math.min((innerWidth - 80) / r.w, (innerHeight - 60) / r.h);
+  return state.mode === 'network' ? k * NET_DEFAULT_ZOOM : k;
+}
+
+// 重算并应用缩放下限（模式切换或窗口缩放时调用）。
+function updateFitK() {
+  state.fitK = currentFitK();
+  zoomBehavior.scaleExtent([state.fitK, 120]);
+}
+
+function fitTransformForCurrentWorld() {
   const k = state.fitK;
-  const cx = WORLD_W / 2, cy = WORLD_H / 2;
-  animateTransformTo(zoomIdentity.translate(innerWidth / 2 - cx * k, innerHeight / 2 - cy * k).scale(k), dur);
+  const { cx, cy } = currentWorld();
+  return zoomIdentity.translate(innerWidth / 2 - cx * k, innerHeight / 2 - cy * k).scale(k);
+}
+
+function fitView(dur = 500) {
+  animateTransformTo(fitTransformForCurrentWorld(), dur);
 }
 
 // 模式切换：整体模式（学科聚合）↔ 网络模式（声明网络）。只切渲染内容，不动视图。
