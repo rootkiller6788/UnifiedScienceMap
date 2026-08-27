@@ -36,6 +36,12 @@ const NET_CLUSTER_PULL_X = 0.58;
 const NET_CLUSTER_PULL_Y = 0.66;
 const NET_FIT_WORLD = { left: 110, right: 1490, top: 265, bottom: 635 };
 const NET_DEFAULT_ZOOM = 1.196;
+const OVERVIEW_ZOOM_OUT = 0.9;  // 整体模式取景后移 10%，避免边缘学科圆被视口裁切
+const GIF_MODE = new URLSearchParams(location.search).has('gif') || location.hash.includes('gif');
+const GIF_MANUAL = new URLSearchParams(location.search).has('manualGif');
+const GIF_OVERVIEW_MS = 2500;
+const GIF_CLASS_MS = 1200;
+const GIF_END_MS = 1000;
 
 const DIR_PALETTE = new Map(Object.entries({
   Algebra: '#ffff00',
@@ -185,6 +191,13 @@ const state = {
   fitK: 1,                  // 最远视图缩放（整图铺满屏）＝缩放下限
   mode: 'overview',         // 'overview' 整体模式（学科聚合）| 'network' 网络模式（声明网络）
   hover: -1,
+  focusDir: '',
+  presentation: {
+    enabled: GIF_MODE,
+    timer: 0,
+    dirs: [],
+    index: 0,
+  },
   hiddenDirs: new Set(),
   dpr: 1,
   glRenderer,
@@ -212,6 +225,8 @@ async function init() {
   buildLegend();
   $('loading').classList.add('hidden');
   fitView(0);
+  if (state.presentation.enabled && !GIF_MANUAL) startGifPresentation();
+  if (state.presentation.enabled && GIF_MANUAL) installGifRecorder();
   requestAnimationFrame(render);
 }
 
@@ -489,6 +504,7 @@ function setupZoom() {
   const sel = select(canvas);
   // 整体模式是静态总览；网络模式才允许缩放/拖拽。
   zoomBehavior.filter((ev) => {
+    if (state.presentation.enabled) return false;
     if (state.mode === 'overview') return false;
     if (ev.type === 'mousedown') return state.transform.k > state.fitK + 1e-3;
     if (ev.type === 'touchstart' && (!ev.touches || ev.touches.length === 1)) {
@@ -503,7 +519,7 @@ function setupZoom() {
 }
 
 function updateCanvasCursor() {
-  canvas.style.cursor = state.mode === 'overview' ? 'default' : 'grab';
+  canvas.style.cursor = state.presentation.enabled || state.mode === 'overview' ? 'default' : 'grab';
 }
 
 function nodeVisible(i) {
@@ -565,7 +581,7 @@ function currentWorld() {
 function currentFitK() {
   const r = currentWorld();
   const k = Math.min((innerWidth - 80) / r.w, (innerHeight - 60) / r.h);
-  return state.mode === 'network' ? k * NET_DEFAULT_ZOOM : k;
+  return state.mode === 'network' ? k * NET_DEFAULT_ZOOM : k * OVERVIEW_ZOOM_OUT;
 }
 
 // 重算并应用缩放下限（模式切换或窗口缩放时调用）。
@@ -590,6 +606,7 @@ function switchMode(mode) {
   if (state.mode === mode) return;
   state.mode = mode;
   state.hover = -1;
+  if (mode === 'overview') state.focusDir = '';
   $('btnOverview').classList.toggle('active', mode === 'overview');
   $('btnNetwork').classList.toggle('active', mode === 'network');
   updateFitK();
@@ -614,6 +631,80 @@ function setupUI() {
   $('search').addEventListener('input', (e) => onSearch(e.target.value));
   canvas.addEventListener('mousemove', onMouseMove);
   canvas.addEventListener('mouseleave', () => { state.hover = -1; $('hoverInfo').textContent = ''; requestRender(); });
+  if (state.presentation.enabled) {
+    document.body.classList.add('gif-mode');
+  }
+}
+
+function startGifPresentation() {
+  document.body.classList.add('gif-mode');
+  state.presentation.dirs = [...state.data.dirs]
+    .filter((d) => d.count > 0)
+    .sort((a, b) => b.count - a.count)
+    .map((d) => d.name);
+  state.presentation.index = 0;
+  playGifLoop();
+}
+
+function installGifRecorder() {
+  const params = new URLSearchParams(location.search);
+  document.body.classList.add('gif-mode');
+  state.presentation.dirs = [...state.data.dirs]
+    .filter((d) => d.count > 0)
+    .sort((a, b) => b.count - a.count)
+    .map((d) => d.name);
+  document.body.dataset.gifReady = '1';
+  document.body.dataset.gifDirs = JSON.stringify(state.presentation.dirs);
+  new MutationObserver(() => {
+    const mode = document.body.dataset.frameMode;
+    if (!mode) return;
+    setGifFrame(mode, document.body.dataset.frameFocus || '');
+  }).observe(document.body, { attributes: true, attributeFilter: ['data-frame-mode', 'data-frame-focus'] });
+  document.body.addEventListener('science-map-frame', (event) => {
+    const detail = event.detail || {};
+    setGifFrame(detail.mode, detail.focusDir || '');
+  });
+  setGifFrame(params.get('frameMode') || 'overview', params.get('frameFocus') || '');
+}
+
+function setGifFrame(mode, focusDir = '') {
+  state.mode = mode;
+  state.hover = -1;
+  state.focusDir = focusDir;
+  updateFitK();
+  state.transform = fitTransformForCurrentWorld();
+  syncD3();
+  updateCanvasCursor();
+  render();
+}
+
+function playGifLoop() {
+  clearTimeout(state.presentation.timer);
+  state.focusDir = '';
+  if (state.mode !== 'overview') switchMode('overview');
+  else fitView(450);
+  state.presentation.timer = setTimeout(() => {
+    switchMode('network');
+    state.presentation.timer = setTimeout(playNextGifClass, 650);
+  }, GIF_OVERVIEW_MS);
+}
+
+function playNextGifClass() {
+  const dirs = state.presentation.dirs;
+  if (!dirs.length) {
+    state.presentation.timer = setTimeout(playGifLoop, GIF_END_MS);
+    return;
+  }
+  if (state.presentation.index >= dirs.length) {
+    state.presentation.index = 0;
+    state.focusDir = '';
+    switchMode('overview');
+    state.presentation.timer = setTimeout(playGifLoop, GIF_END_MS);
+    return;
+  }
+  state.focusDir = dirs[state.presentation.index++];
+  requestRender();
+  state.presentation.timer = setTimeout(playNextGifClass, GIF_CLASS_MS);
 }
 
 function onSearch(q) {
@@ -647,6 +738,7 @@ function flyToNode(idx) {
 
 // hover：空间网格索引，O(近邻) 而非 O(n)
 function onMouseMove(ev) {
+  if (state.presentation.enabled) return;
   if (state.mode !== 'network') { state.hover = -1; requestRender(); return; }
   const rect = canvas.getBoundingClientRect();
   const sx = ev.clientX - rect.left, sy = ev.clientY - rect.top;
@@ -717,13 +809,13 @@ function render() {
   if (aggregate) drawAxes(k);
   $('nodeCount').textContent = state.data.meta.conceptCount.toLocaleString();
   $('edgeCount').textContent = state.data.meta.edgeCount.toLocaleString();
-  if (state.mode === 'network') requestRender();
+  if (state.mode === 'network' && !state.presentation.enabled) requestRender();
 }
 
 function updateFps() {
   const panel = $('fpsPanel');
   if (!panel) return;
-  const network = state.mode === 'network';
+  const network = state.mode === 'network' && !state.presentation.enabled;
   panel.style.display = network ? 'block' : 'none';
   if (!network) {
     state.fpsLast = 0;
@@ -755,32 +847,46 @@ function drawBackground(w, h) {
   ctx.fillRect(0, 0, w, h);
 }
 
-// 远视图：25 学科聚合块 + 学科间依赖（小圆大陆样式）
+// 远视图：25 学科聚合块 + 学科间依赖（小圆大陆样式）。GIF/录制模式可高亮单个学科。
 function drawDirLevel(vLeft, vRight, vTop, vBottom, k) {
   const dirs = state.data.dirs;
+  const focus = state.focusDir;
+  const focusInfo = focus ? state.dirColor.get(focus) : null;
+  const focusRgb = focusInfo ? focusInfo.rgb : EDGE_COLOR;
   const maxW = Math.max(1, ...state.dirEdges.map((e) => e.w));
   for (const e of state.dirEdges) {
     const a = dirs[e.s], b = dirs[e.t];
     if (!dirVisible(a) || !dirVisible(b)) continue;
+    const touches = focus && (a.name === focus || b.name === focus);
+    if (focus && !touches) continue;   // 高亮时只画连到焦点学科的边
     const f = e.w / maxW;
-    ctx.strokeStyle = `rgba(${EDGE_COLOR},${0.07 + 0.22 * f})`;   // 不悬停一律灰
-    ctx.lineWidth = Math.max(0.5, 2.0 * f) / k;
+    if (touches) {
+      ctx.strokeStyle = `rgba(${focusRgb},${0.35 + 0.4 * f})`;
+      ctx.lineWidth = Math.max(1.2, 2.6 * f) / k;
+    } else {
+      ctx.strokeStyle = `rgba(${EDGE_COLOR},${0.07 + 0.22 * f})`;
+      ctx.lineWidth = Math.max(0.5, 2.0 * f) / k;
+    }
     ctx.beginPath(); ctx.moveTo(a.cx, a.cy); ctx.lineTo(b.cx, b.cy); ctx.stroke();
   }
   for (const d of dirs) {
     if (!dirVisible(d)) continue;
-    const r = (14 + Math.sqrt(d.count) * 1.4) / k;
+    const isFocus = focus && d.name === focus;
+    const dimmed = focus && !isFocus;
+    const r = ((14 + Math.sqrt(d.count) * 1.4) * (isFocus ? 1.3 : 1)) / k;
     if (d.cx < vLeft - r || d.cx > vRight + r || d.cy < vTop - r || d.cy > vBottom + r) continue;
     const info = state.dirColor.get(d.name);
     ctx.beginPath(); ctx.arc(d.cx, d.cy, r, 0, Math.PI * 2);
-    ctx.fillStyle = `rgba(${info.rgb},0.18)`;
+    ctx.fillStyle = dimmed ? 'rgba(72,82,96,0.10)' : `rgba(${info.rgb},${isFocus ? 0.30 : 0.18})`;
     ctx.fill();
-    ctx.lineWidth = 2 / k; ctx.strokeStyle = `rgba(${info.rgb},0.9)`; ctx.stroke();
-    ctx.fillStyle = '#e6edf3';
-    ctx.font = `${13 / k}px "Segoe UI","Microsoft YaHei",sans-serif`;
+    ctx.lineWidth = (isFocus ? 4 : 2) / k;
+    ctx.strokeStyle = dimmed ? 'rgba(90,104,124,0.35)' : `rgba(${info.rgb},${isFocus ? 1 : 0.9})`;
+    ctx.stroke();
+    ctx.fillStyle = isFocus ? '#ffffff' : (dimmed ? '#69727e' : '#e6edf3');
+    ctx.font = `${(isFocus ? 17 : 13) / k}px "Segoe UI","Microsoft YaHei",sans-serif`;
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.fillText(d.name, d.cx, d.cy);
-    ctx.fillStyle = '#8b949e';
+    ctx.fillStyle = isFocus ? 'rgba(255,255,255,0.9)' : '#8b949e';
     ctx.font = `${10 / k}px "Segoe UI",sans-serif`;
     ctx.fillText(`${d.count.toLocaleString()}`, d.cx, d.cy + r + 11 / k);
   }
@@ -792,8 +898,49 @@ function drawCrisp(vLeft, vRight, vTop, vBottom, k) {
   if (!state.glRenderer.supported) {
     drawEdgesLive(vLeft, vRight, vTop, vBottom, k);
   }
+  if (state.presentation.enabled) drawPresentationNodes(vLeft, vRight, vTop, vBottom, k);
   drawNetworkDirLabels(k);
   if (k >= LABEL_K) drawCrispLabels(k);
+}
+
+function drawPresentationNodes(vLeft, vRight, vTop, vBottom, k) {
+  const { nodes } = state.data;
+  const focus = state.focusDir;
+  const margin = 26 / k;
+  const left = vLeft - margin;
+  const right = vRight + margin;
+  const top = vTop - margin;
+  const bottom = vBottom + margin;
+  const base = Math.max(1.0 / k, 1.25 / k);
+
+  ctx.save();
+  ctx.globalCompositeOperation = 'source-over';
+  for (let i = 0; i < nodes.x.length; i++) {
+    if (!nodeVisible(i)) continue;
+    const px = nodes.x[i];
+    const py = nodes.y[i];
+    if (px < left || px > right || py < top || py > bottom) continue;
+    const info = state.dirColor.get(nodes.dir[i]);
+    ctx.fillStyle = `rgba(${info.rgb},0.34)`;
+    ctx.fillRect(px - base * 0.5, py - base * 0.5, base, base);
+  }
+
+  if (focus) {
+    const idx = focusDirIndex();
+    const members = idx >= 0 ? state.dirMembers[idx] : [];
+    const r = Math.max(2.4 / k, base * 1.7);
+    ctx.globalCompositeOperation = 'lighter';
+    for (const i of members) {
+      if (!nodeVisible(i)) continue;
+      const px = nodes.x[i];
+      const py = nodes.y[i];
+      if (px < left || px > right || py < top || py > bottom) continue;
+      const info = state.dirColor.get(nodes.dir[i]);
+      ctx.fillStyle = `rgba(${info.rgb},0.95)`;
+      ctx.fillRect(px - r * 0.5, py - r * 0.5, r, r);
+    }
+  }
+  ctx.restore();
 }
 
 // 默认依赖边（灰/白细线，视口裁剪 + 数量上限）
@@ -909,17 +1056,19 @@ function drawNetworkDirLabels(k) {
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.lineJoin = 'round';
+  const focus = state.focusDir;
   const visible = state.dirCenters
-    .filter((d) => NETWORK_LABELS.has(d.name) && dirVisible(d))
+    .filter((d) => dirVisible(d) && (NETWORK_LABELS.has(d.name) || d.name === focus))
     .sort((a, b) => b.count - a.count);
   const maxCount = Math.max(1, ...visible.map((d) => d.count || 0));
   const occupied = [];
 
   for (const d of visible) {
     const weight = Math.log1p(d.count || 1) / Math.log1p(maxCount);
-    const screenFont = Math.round(11 + weight * 4);
+    const focused = focus && d.name === focus;
+    const screenFont = focused ? 24 : Math.round(11 + weight * 4);
     const worldFont = screenFont / k;
-    ctx.font = `600 ${worldFont}px "Segoe UI","Microsoft YaHei",sans-serif`;
+    ctx.font = `${focused ? 800 : 600} ${worldFont}px "Segoe UI","Microsoft YaHei",sans-serif`;
     const sx = d.x * k + state.transform.x;
     const y = d.y - (13 + weight * 6) / k;
     const sy = y * k + state.transform.y;
@@ -936,16 +1085,23 @@ function drawNetworkDirLabels(k) {
         overlaps++;
       }
     }
-    if (overlaps > 2 && k < 1.35) continue;
+    if (!focused && overlaps > 2 && k < 1.35) continue;
     occupied.push(rect);
 
     ctx.strokeStyle = 'rgba(0,0,0,0.92)';
-    ctx.lineWidth = 3.8 / k;
+    ctx.lineWidth = (focused ? 5.6 : 3.8) / k;
     ctx.strokeText(d.name, d.x, y);
-    ctx.fillStyle = `rgba(235,238,245,${0.78 + weight * 0.16})`;
+    ctx.fillStyle = focused
+      ? `rgba(${state.dirColor.get(d.name).rgb},0.96)`
+      : `rgba(235,238,245,${0.78 + weight * 0.16})`;
     ctx.fillText(d.name, d.x, y);
   }
   ctx.restore();
+}
+
+function focusDirIndex() {
+  if (!state.focusDir || !state.data) return -1;
+  return state.data.dirs.findIndex((d) => d.name === state.focusDir);
 }
 
 // Declaration labels: visible-area only, ranked and collision-checked.
