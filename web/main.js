@@ -36,7 +36,8 @@ const NET_CLUSTER_PULL_X = 0.58;
 const NET_CLUSTER_PULL_Y = 0.66;
 const NET_FIT_WORLD = { left: 110, right: 1490, top: 265, bottom: 635 };
 const NET_DEFAULT_ZOOM = 1.196;
-const OVERVIEW_ZOOM_OUT = 0.9;  // 整体模式取景后移 10%，避免边缘学科圆被视口裁切
+const OVERVIEW_ZOOM_OUT = 0.64125;  // 整体模式取景再拉远约 29%（0.9 × 0.75 × 0.95），避免边缘学科圆高亮放大后被视口裁切
+const HIVE_ZOOM = 1.0;  // hive 模式取景更近：径向图在画面中更大（>1 放大，<1 拉远）
 const GIF_MODE = new URLSearchParams(location.search).has('gif') || location.hash.includes('gif');
 const GIF_MANUAL = new URLSearchParams(location.search).has('manualGif');
 const GIF_OVERVIEW_MS = 2500;
@@ -174,6 +175,7 @@ const $ = (id) => document.getElementById(id);
 
 const state = {
   data: null,
+  hiveData: null,
   dirColor: new Map(),      // dirName -> {color, rgb}
   nodeDirIdx: [],           // 节点 -> dir 索引
   domains: [],
@@ -191,6 +193,8 @@ const state = {
   fitK: 1,                  // 最远视图缩放（整图铺满屏）＝缩放下限
   mode: 'overview',         // 'overview' 整体模式（学科聚合）| 'network' 网络模式（声明网络）
   hover: -1,
+  hiveHover: '',
+  hiveLocked: '',
   focusDir: '',
   presentation: {
     enabled: GIF_MODE,
@@ -216,6 +220,7 @@ async function init() {
 
   try {
     state.data = await loadDatasets();
+    state.hiveData = await loadHiveData();
   } catch (err) {
     showToast('Failed to load map data: ' + err.message);
     return;
@@ -228,6 +233,16 @@ async function init() {
   if (state.presentation.enabled && !GIF_MANUAL) startGifPresentation();
   if (state.presentation.enabled && GIF_MANUAL) installGifRecorder();
   requestAnimationFrame(render);
+}
+
+async function loadHiveData() {
+  try {
+    const res = await fetch('hive-data.json');
+    if (res.ok) return await res.json();
+  } catch {
+    // Hive can fall back to runtime aggregation while iterating locally.
+  }
+  return null;
 }
 
 async function loadDatasets() {
@@ -294,7 +309,7 @@ function resize() {
   canvas.style.height = innerHeight + 'px';
   // 最远视图＝整图铺满屏，是缩放下限，不能再缩小
   updateFitK();
-  if (state.mode === 'overview' && state.data) {
+  if ((state.mode === 'overview' || state.mode === 'hive') && state.data) {
     state.transform = fitTransformForCurrentWorld();
     syncD3();
     requestRender();
@@ -505,7 +520,7 @@ function setupZoom() {
   // 整体模式是静态总览；网络模式才允许缩放/拖拽。
   zoomBehavior.filter((ev) => {
     if (state.presentation.enabled) return false;
-    if (state.mode === 'overview') return false;
+    if (state.mode === 'overview' || state.mode === 'hive') return false;
     if (ev.type === 'mousedown') return state.transform.k > state.fitK + 1e-3;
     if (ev.type === 'touchstart' && (!ev.touches || ev.touches.length === 1)) {
       return state.transform.k > state.fitK + 1e-3;
@@ -519,7 +534,7 @@ function setupZoom() {
 }
 
 function updateCanvasCursor() {
-  canvas.style.cursor = state.presentation.enabled || state.mode === 'overview' ? 'default' : 'grab';
+  canvas.style.cursor = state.presentation.enabled || state.mode === 'overview' || state.mode === 'hive' ? 'default' : 'grab';
 }
 
 function nodeVisible(i) {
@@ -556,7 +571,7 @@ function animateTransformTo(target, dur = 600) {
 
 // 当前模式的「世界」边界与中心：整体=1600×900；网络=纵向压缩后的 NET_PLOT 范围。
 function currentWorld() {
-  if (state.mode === 'overview') {
+  if (state.mode === 'overview' || state.mode === 'hive') {
     return { cx: WORLD_W / 2, cy: WORLD_H / 2, w: WORLD_W, h: WORLD_H };
   }
   if (state.networkBounds) {
@@ -581,7 +596,9 @@ function currentWorld() {
 function currentFitK() {
   const r = currentWorld();
   const k = Math.min((innerWidth - 80) / r.w, (innerHeight - 60) / r.h);
-  return state.mode === 'network' ? k * NET_DEFAULT_ZOOM : k * OVERVIEW_ZOOM_OUT;
+  if (state.mode === 'network') return k * NET_DEFAULT_ZOOM;
+  if (state.mode === 'hive') return k * HIVE_ZOOM;
+  return k * OVERVIEW_ZOOM_OUT;
 }
 
 // 重算并应用缩放下限（模式切换或窗口缩放时调用）。
@@ -606,12 +623,17 @@ function switchMode(mode) {
   if (state.mode === mode) return;
   state.mode = mode;
   state.hover = -1;
-  if (mode === 'overview') state.focusDir = '';
+  if (mode === 'overview' || mode === 'hive') state.focusDir = '';
+  if (mode !== 'hive') {
+    state.hiveHover = '';
+    state.hiveLocked = '';
+  }
   $('btnOverview').classList.toggle('active', mode === 'overview');
+  $('btnHive').classList.toggle('active', mode === 'hive');
   $('btnNetwork').classList.toggle('active', mode === 'network');
   updateFitK();
   updateCanvasCursor();
-  if (mode === 'overview') {
+  if (mode === 'overview' || mode === 'hive') {
     fitView(350);
     return;
   }
@@ -622,6 +644,7 @@ function switchMode(mode) {
 function setupUI() {
   $('btnFit').onclick = () => fitView();
   $('btnOverview').onclick = () => switchMode('overview');
+  $('btnHive').onclick = () => switchMode('hive');
   $('btnNetwork').onclick = () => switchMode('network');
   $('btnHudToggle').onclick = () => {
     const collapsed = $('hud').classList.toggle('collapsed');
@@ -630,7 +653,13 @@ function setupUI() {
   };
   $('search').addEventListener('input', (e) => onSearch(e.target.value));
   canvas.addEventListener('mousemove', onMouseMove);
-  canvas.addEventListener('mouseleave', () => { state.hover = -1; $('hoverInfo').textContent = ''; requestRender(); });
+  canvas.addEventListener('click', onCanvasClick);
+  canvas.addEventListener('mouseleave', () => {
+    state.hover = -1;
+    state.hiveHover = '';
+    if (!state.hiveLocked) $('hoverInfo').textContent = '';
+    requestRender();
+  });
   if (state.presentation.enabled) {
     document.body.classList.add('gif-mode');
   }
@@ -671,6 +700,14 @@ function setGifFrame(mode, focusDir = '') {
   state.mode = mode;
   state.hover = -1;
   state.focusDir = focusDir;
+  if (mode === 'hive') {
+    // hive 模式用 frameFocus 驱动轴高亮：亮起该轴及其所有关联弦
+    state.hiveHover = focusDir;
+    state.hiveLocked = '';
+  } else {
+    state.hiveHover = '';
+    state.hiveLocked = '';
+  }
   updateFitK();
   state.transform = fitTransformForCurrentWorld();
   syncD3();
@@ -722,7 +759,12 @@ function onSearch(q) {
     }
   }
   if (match >= 0) {
-    if (state.mode !== 'network') { state.mode = 'network'; $('btnNetwork').classList.add('active'); $('btnOverview').classList.remove('active'); }
+    if (state.mode !== 'network') {
+      state.mode = 'network';
+      $('btnNetwork').classList.add('active');
+      $('btnOverview').classList.remove('active');
+      $('btnHive').classList.remove('active');
+    }
     state.hover = match;
     $('searchHint').textContent = `Found ${count}+ matches; showing the first`;
     flyToNode(match);
@@ -739,6 +781,13 @@ function flyToNode(idx) {
 // hover：空间网格索引，O(近邻) 而非 O(n)
 function onMouseMove(ev) {
   if (state.presentation.enabled) return;
+  if (state.mode === 'hive') {
+    const axis = pickHiveAxis(ev);
+    state.hiveHover = axis?.subject || '';
+    updateHiveHud();
+    requestRender();
+    return;
+  }
   if (state.mode !== 'network') { state.hover = -1; requestRender(); return; }
   const rect = canvas.getBoundingClientRect();
   const sx = ev.clientX - rect.left, sy = ev.clientY - rect.top;
@@ -764,6 +813,15 @@ function onMouseMove(ev) {
   requestRender();
 }
 
+function onCanvasClick(ev) {
+  if (state.presentation.enabled || state.mode !== 'hive') return;
+  const axis = pickHiveAxis(ev);
+  state.hiveLocked = axis ? (state.hiveLocked === axis.subject ? '' : axis.subject) : '';
+  state.hiveHover = axis?.subject || '';
+  updateHiveHud();
+  requestRender();
+}
+
 // ---- 渲染 ----
 let renderQueued = false;
 function requestRender() {
@@ -776,11 +834,13 @@ function render() {
   updateFps();
   const { dpr } = state;
   const w = innerWidth, h = innerHeight;
-  const aggregate = state.mode === 'overview';
-  if (glCanvas) glCanvas.style.display = aggregate ? 'none' : 'block';
+  const overview = state.mode === 'overview';
+  const hive = state.mode === 'hive';
+  const network = state.mode === 'network';
+  if (glCanvas) glCanvas.style.display = network ? 'block' : 'none';
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, w, h);
-  const glRendered = !aggregate && state.glRenderer.render({
+  const glRendered = network && state.glRenderer.render({
     transform: state.transform,
     dpr: state.dpr,
     hiddenDirs: state.hiddenDirs,
@@ -790,7 +850,7 @@ function render() {
     height: innerHeight,
     dirs: state.data?.dirs || [],
   });
-  if (aggregate || !glRendered) drawBackground(w, h);
+  if (!network || !glRendered) drawBackground(w, h);
   if (!state.data) return;
 
   const { x, y, k } = state.transform;
@@ -800,13 +860,14 @@ function render() {
   ctx.scale(k, k);
 
   // 模式由按钮决定（不随缩放自动切），两种模式干净切换
-  if (aggregate) drawDirLevel(vLeft, vRight, vTop, vBottom, k);
+  if (overview) drawDirLevel(vLeft, vRight, vTop, vBottom, k);
+  else if (hive) drawHive(k);
   else drawCrisp(vLeft, vRight, vTop, vBottom, k);
-  if (state.hover >= 0 && !aggregate) drawHover(k);
+  if (state.hover >= 0 && network) drawHover(k);
 
   ctx.restore();
 
-  if (aggregate) drawAxes(k);
+  if (overview) drawAxes(k);
   $('nodeCount').textContent = state.data.meta.conceptCount.toLocaleString();
   $('edgeCount').textContent = state.data.meta.edgeCount.toLocaleString();
   if (state.mode === 'network' && !state.presentation.enabled) requestRender();
@@ -839,6 +900,7 @@ function updateFps() {
 function drawBackground(w, h) {
   ctx.fillStyle = '#000';
   ctx.fillRect(0, 0, w, h);
+  if (state.presentation.enabled) return; // GIF 录制：纯黑底，便于后期抠透明
   const g = ctx.createRadialGradient(w * 0.52, h * 0.47, Math.min(w, h) * 0.08, w * 0.52, h * 0.47, Math.max(w, h) * 0.66);
   g.addColorStop(0, 'rgba(18,22,28,0.38)');
   g.addColorStop(0.58, 'rgba(2,4,7,0.08)');
@@ -873,7 +935,7 @@ function drawDirLevel(vLeft, vRight, vTop, vBottom, k) {
     if (!dirVisible(d)) continue;
     const isFocus = focus && d.name === focus;
     const dimmed = focus && !isFocus;
-    const r = ((14 + Math.sqrt(d.count) * 1.4) * (isFocus ? 1.3 : 1)) / k;
+    const r = ((14 + Math.sqrt(d.count) * 1.4) * (isFocus ? 1.15 : 1)) / k;
     if (d.cx < vLeft - r || d.cx > vRight + r || d.cy < vTop - r || d.cy > vBottom + r) continue;
     const info = state.dirColor.get(d.name);
     ctx.beginPath(); ctx.arc(d.cx, d.cy, r, 0, Math.PI * 2);
@@ -890,6 +952,383 @@ function drawDirLevel(vLeft, vRight, vTop, vBottom, k) {
     ctx.font = `${10 / k}px "Segoe UI",sans-serif`;
     ctx.fillText(`${d.count.toLocaleString()}`, d.cx, d.cy + r + 11 / k);
   }
+}
+
+function drawHive(k) {
+  const hive = state.hiveData || buildRuntimeHiveData();
+  const axes = hive.axes.filter((axis) => dirVisible({ name: axis.subject }));
+  if (!axes.length) return;
+  const activeSubject = activeHiveSubject();
+  const relatedSubjects = activeSubject ? hiveRelatedSubjects(activeSubject, hive) : new Set();
+
+  const cx = WORLD_W / 2;
+  const cy = WORLD_H / 2;
+  const innerR = 72;
+  const outerR = 360;
+  const labelR = 405;
+  const positions = new Map();
+
+  ctx.save();
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+
+  drawHiveGrid(cx, cy, outerR, k);
+
+  for (const axis of axes) {
+    const angle = axis.angle;
+    positions.set(axis.index, {
+      angle,
+      x1: cx + Math.cos(angle) * innerR,
+      y1: cy + Math.sin(angle) * innerR,
+      x2: cx + Math.cos(angle) * outerR,
+      y2: cy + Math.sin(angle) * outerR,
+      lx: cx + Math.cos(angle) * labelR,
+      ly: cy + Math.sin(angle) * labelR,
+      axis,
+    });
+  }
+
+  drawHiveChords(hive.relations, positions, cx, cy, k, activeSubject);
+  drawHiveAxes(axes, positions, k, activeSubject, relatedSubjects);
+  drawHiveCenter(cx, cy, k);
+  ctx.restore();
+}
+
+function buildRuntimeHiveData() {
+  const axes = state.data.dirs.map((d, i) => ({
+    subject: d.name,
+    index: i,
+    order: i,
+    angle: -Math.PI / 2 + (Math.PI * 2 * i) / state.data.dirs.length,
+    count: d.count,
+    countNorm: 1,
+    depthMin: 0,
+    depthMax: 1,
+    depthMean: 0.5,
+    density: new Array(16).fill(0).map((_, bin) => ({
+      bin,
+      depth0: bin / 16,
+      depth1: (bin + 1) / 16,
+      count: 1,
+      norm: 0.45,
+    })),
+  }));
+  const relations = state.dirEdges.map((e) => ({
+    sourceIndex: e.s,
+    targetIndex: e.t,
+    count: e.w,
+    countNorm: 0.45,
+    strengthNorm: 0.45,
+  }));
+  return { axes, relations };
+}
+
+function drawHiveGrid(cx, cy, outerR, k) {
+  ctx.save();
+  ctx.strokeStyle = 'rgba(230,237,243,0.075)';
+  ctx.lineWidth = 1 / k;
+  for (let ring = 1; ring <= 5; ring++) {
+    const r = (outerR * ring) / 5;
+    ctx.beginPath();
+    for (let i = 0; i < 6; i++) {
+      const a = -Math.PI / 2 + (Math.PI * 2 * i) / 6;
+      const x = cx + Math.cos(a) * r;
+      const y = cy + Math.sin(a) * r;
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.closePath();
+    ctx.stroke();
+  }
+  for (let i = 0; i < 6; i++) {
+    const a = -Math.PI / 2 + (Math.PI * 2 * i) / 6;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(cx + Math.cos(a) * outerR, cy + Math.sin(a) * outerR);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawHiveChords(relations, positions, cx, cy, k, activeSubject = '') {
+  const visible = relations
+    .filter((e) => positions.has(e.sourceIndex) && positions.has(e.targetIndex))
+    .filter((e) => activeSubject
+      ? e.source === activeSubject || e.target === activeSubject
+      : e.visibleDefault)
+    .sort((a, b) => (b.strengthNorm || 0) - (a.strengthNorm || 0))
+    .slice(0, activeSubject ? 24 : 120);
+  ctx.save();
+  ctx.globalCompositeOperation = 'source-over';
+  for (const e of visible) {
+    const a = positions.get(e.sourceIndex);
+    const b = positions.get(e.targetIndex);
+    if (!a || !b) continue;
+    const countNorm = e.countNorm || 0;
+    const strength = e.strengthNorm || 0;
+    const f = Math.sqrt(countNorm);
+    const r = 118 + 188 * Math.sqrt(strength || countNorm);
+    const ax = cx + Math.cos(a.angle) * r;
+    const ay = cy + Math.sin(a.angle) * r;
+    const bx = cx + Math.cos(b.angle) * r;
+    const by = cy + Math.sin(b.angle) * r;
+    if (activeSubject) {
+      const ca = state.dirColor.get(a.axis.subject);
+      const cb = state.dirColor.get(b.axis.subject);
+      const grad = ctx.createLinearGradient(ax, ay, bx, by);
+      grad.addColorStop(0, `rgba(${ca.rgb},${0.28 + strength * 0.44})`);
+      grad.addColorStop(1, `rgba(${cb.rgb},${0.28 + strength * 0.44})`);
+      ctx.strokeStyle = grad;
+      ctx.lineWidth = (1.1 + f * 4.8) / k;
+    } else {
+      ctx.strokeStyle = `rgba(160,170,190,${0.018 + strength * 0.13})`;
+      ctx.lineWidth = (0.35 + f * 2.5) / k;
+    }
+    ctx.beginPath();
+    ctx.moveTo(ax, ay);
+    ctx.bezierCurveTo(cx, cy, cx, cy, bx, by);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawHiveAxes(axes, positions, k, activeSubject = '', relatedSubjects = new Set()) {
+  ctx.save();
+  ctx.textBaseline = 'middle';
+  const labels = [];
+  for (const axis of axes) {
+    const p = positions.get(axis.index);
+    const info = state.dirColor.get(axis.subject);
+    const weight = axis.countNorm || 0.5;
+    const emphasis = hiveAxisEmphasis(axis.subject, activeSubject, relatedSubjects);
+
+    drawHiveDensitySpine(p, axis, info, k, emphasis);
+    labels.push({ p, axis, info, weight, emphasis });
+  }
+  drawHiveLabels(labels, k);
+  ctx.restore();
+}
+
+function drawHiveDensitySpine(p, axis, info, k, emphasis = 1) {
+  const dx = Math.cos(p.angle);
+  const dy = Math.sin(p.angle);
+  const px = -dy;
+  const py = dx;
+
+  ctx.strokeStyle = `rgba(${info.rgb},${0.04 + 0.09 * emphasis})`;
+  ctx.lineWidth = (4 + 8 * (axis.countNorm || 0.5)) / k;
+  ctx.beginPath();
+  ctx.moveTo(p.x1, p.y1);
+  ctx.lineTo(p.x2, p.y2);
+  ctx.stroke();
+
+  const bins = axis.density || [];
+  for (const bin of bins) {
+    const t = (bin.depth0 + bin.depth1) / 2;
+    const x = p.x1 + (p.x2 - p.x1) * t;
+    const y = p.y1 + (p.y2 - p.y1) * t;
+    const density = bin.widthNorm ?? Math.sqrt(bin.localNorm ?? bin.norm ?? 0);
+    if (density <= 0) continue;
+    const len = (4 + 24 * density) / k;
+    const core = (1.2 + 4.6 * density) / k;
+
+    ctx.strokeStyle = `rgba(${info.rgb},${(0.06 + 0.17 * density) * emphasis})`;
+    ctx.lineWidth = (core + 5 / k);
+    ctx.beginPath();
+    ctx.moveTo(x - px * len * 0.74, y - py * len * 0.74);
+    ctx.lineTo(x + px * len * 0.74, y + py * len * 0.74);
+    ctx.stroke();
+
+    ctx.strokeStyle = `rgba(${info.rgb},${(0.18 + 0.56 * density) * emphasis})`;
+    ctx.lineWidth = core;
+    ctx.beginPath();
+    ctx.moveTo(x - px * len, y - py * len);
+    ctx.lineTo(x + px * len, y + py * len);
+    ctx.stroke();
+  }
+}
+
+function drawHiveLabels(labels, k) {
+  const gap = 15 / k;
+  const top = 74 / k;
+  const bottom = WORLD_H - 70 / k;
+  const left = labels.filter((l) => Math.cos(l.p.angle) < -0.08).sort((a, b) => a.p.ly - b.p.ly);
+  const right = labels.filter((l) => Math.cos(l.p.angle) >= -0.08).sort((a, b) => a.p.ly - b.p.ly);
+  placeHiveLabelSide(left, false, gap, top, bottom, k);
+  placeHiveLabelSide(right, true, gap, top, bottom, k);
+}
+
+function placeHiveLabelSide(items, right, gap, top, bottom, k) {
+  let y = top;
+  for (const item of items) {
+    item.labelY = Math.max(item.p.ly, y);
+    y = item.labelY + gap;
+  }
+  const overflow = items.length ? items[items.length - 1].labelY - bottom : 0;
+  if (overflow > 0) {
+    for (const item of items) item.labelY -= overflow;
+  }
+
+  for (const { p, axis, info, weight, labelY, emphasis = 1 } of items) {
+    const size = (9.2 + weight * 5.4) / k;
+    const x = right ? WORLD_W - 270 / k : 270 / k;
+    const textX = x + (right ? 8 / k : -8 / k);
+    const anchorX = p.x2 + Math.cos(p.angle) * 18 / k;
+    const anchorY = p.y2 + Math.sin(p.angle) * 18 / k;
+
+    ctx.strokeStyle = `rgba(${info.rgb},${0.08 + 0.24 * emphasis})`;
+    ctx.lineWidth = 0.9 / k;
+    ctx.beginPath();
+    ctx.moveTo(anchorX, anchorY);
+    ctx.quadraticCurveTo((anchorX + x) / 2, labelY, x, labelY);
+    ctx.stroke();
+
+    ctx.font = `${emphasis > 0.95 ? 850 : 700} ${size}px "Segoe UI","Microsoft YaHei",sans-serif`;
+    ctx.textAlign = right ? 'left' : 'right';
+    ctx.lineWidth = 4 / k;
+    ctx.strokeStyle = 'rgba(0,0,0,0.9)';
+    ctx.strokeText(axis.subject, textX, labelY);
+    ctx.fillStyle = `rgba(${info.rgb},${(0.38 + weight * 0.42) * emphasis})`;
+    ctx.fillText(axis.subject, textX, labelY);
+  }
+}
+
+function activeHiveSubject() {
+  return state.hiveLocked || state.hiveHover || '';
+}
+
+function hiveAxisEmphasis(subject, activeSubject, relatedSubjects) {
+  if (!activeSubject) return 1;
+  if (subject === activeSubject) return 1;
+  if (relatedSubjects.has(subject)) return 0.8;
+  return 0.2;
+}
+
+function hiveRelatedSubjects(subject, hive = state.hiveData) {
+  const related = new Set();
+  if (!hive) return related;
+  const subjectInfo = hive.subjects?.find((s) => s.name === subject);
+  for (const rel of subjectInfo?.strongestRelations || []) related.add(rel.subject);
+  return related;
+}
+
+function pickHiveAxis(ev) {
+  const hive = state.hiveData || buildRuntimeHiveData();
+  if (!hive?.axes?.length) return null;
+  const rect = canvas.getBoundingClientRect();
+  const sx = ev.clientX - rect.left;
+  const sy = ev.clientY - rect.top;
+  const { x, y, k } = state.transform;
+  const wx = (sx - x) / k;
+  const wy = (sy - y) / k;
+  const cx = WORLD_W / 2;
+  const cy = WORLD_H / 2;
+  const dx = wx - cx;
+  const dy = wy - cy;
+  const r = Math.hypot(dx, dy);
+  if (r < 58 || r > 460) return null;
+
+  let best = null;
+  let bestDist = 34 / k;
+  for (const axis of hive.axes) {
+    if (!dirVisible({ name: axis.subject })) continue;
+    const ux = Math.cos(axis.angle);
+    const uy = Math.sin(axis.angle);
+    const along = dx * ux + dy * uy;
+    if (along < 52 || along > 440) continue;
+    const px = dx - ux * along;
+    const py = dy - uy * along;
+    const dist = Math.hypot(px, py);
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = axis;
+    }
+  }
+  return best;
+}
+
+function updateHiveHud() {
+  const subject = activeHiveSubject();
+  if (!subject || !state.hiveData) {
+    $('hoverInfo').textContent = '';
+    $('hoverInfo').style.color = '';
+    return;
+  }
+  const info = state.hiveData.subjects?.find((s) => s.name === subject);
+  if (!info) return;
+  const color = state.dirColor.get(subject);
+  const axis = state.hiveData.axes?.find((a) => a.subject === subject);
+  const strongest = (info.strongestRelations || [])
+    .slice(0, 5)
+    .map((r) => `${r.subject} ${Number(r.strengthNorm ?? r.strength).toFixed(2)}`)
+    .join(' / ');
+  if (state.hiveLocked === subject) {
+    const bridges = (info.bridgeDeclarations || [])
+      .slice(0, 4)
+      .map((b) => b.label)
+      .join(' / ');
+    const types = (info.typeDistribution || [])
+      .slice(0, 4)
+      .map((t) => `${t.kind} ${Math.round(t.share * 100)}%`)
+      .join(' / ');
+    $('hoverInfo').textContent = [
+      `${subject} [locked]`,
+      `Nodes ${info.count.toLocaleString()} · Relations ${info.relationCount.toLocaleString()}`,
+      `Depth ${Number(info.depthMin).toFixed(2)}-${Number(info.depthMax).toFixed(2)} · mean ${Number(info.depthMean).toFixed(2)}`,
+      `Depth density ${hiveDepthSignature(axis)}`,
+      `Cohesion ${Number(info.cohesion || 0).toFixed(2)} · Interdisciplinarity ${Number(info.interdisciplinarity || 0).toFixed(2)}`,
+      strongest ? `Relations: ${strongest}` : '',
+      bridges ? `Bridges: ${bridges}` : '',
+      types ? `Types: ${types}` : '',
+    ].filter(Boolean).join('\n');
+  } else {
+    $('hoverInfo').textContent = [
+      subject,
+      `${info.count.toLocaleString()} nodes`,
+      `${info.relationCount.toLocaleString()} relations`,
+      `depth ${Number(info.depthMin).toFixed(2)}-${Number(info.depthMax).toFixed(2)}`,
+      `cohesion ${Number(info.cohesion || 0).toFixed(2)}`,
+      `interdisciplinarity ${Number(info.interdisciplinarity || 0).toFixed(2)}`,
+      strongest ? `strongest: ${strongest}` : '',
+    ].filter(Boolean).join(' · ');
+  }
+  $('hoverInfo').style.color = color?.color || '';
+}
+
+function hiveDepthSignature(axis) {
+  const bins = axis?.density || [];
+  if (!bins.length) return '00000000';
+  const buckets = Array(8).fill(0);
+  for (const bin of bins) {
+    const mid = (Number(bin.depth0) + Number(bin.depth1)) / 2;
+    const idx = Math.max(0, Math.min(7, Math.floor(mid * 8)));
+    buckets[idx] += Number(bin.count) || 0;
+  }
+  const max = Math.max(...buckets, 1);
+  return buckets.map((v) => Math.round((v / max) * 9)).join('');
+}
+
+function drawHiveCenter(cx, cy, k) {
+  ctx.save();
+  const g = ctx.createRadialGradient(cx, cy, 10 / k, cx, cy, 86);
+  g.addColorStop(0, 'rgba(255,255,255,0.16)');
+  g.addColorStop(1, 'rgba(255,255,255,0.015)');
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  ctx.arc(cx, cy, 86, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(230,237,243,0.18)';
+  ctx.lineWidth = 1.2 / k;
+  ctx.stroke();
+  ctx.fillStyle = 'rgba(230,237,243,0.86)';
+  ctx.font = `${15 / k}px "Segoe UI","Microsoft YaHei",sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('Hive', cx, cy - 8 / k);
+  ctx.fillStyle = 'rgba(139,148,158,0.9)';
+  ctx.font = `${10 / k}px "Segoe UI",sans-serif`;
+  ctx.fillText('subjects as axes', cx, cy + 12 / k);
+  ctx.restore();
 }
 
 // 声明网络视图：默认边和节点由 WebGL 绘制；Canvas 只保留标签/hover 层。
