@@ -26,7 +26,7 @@
     #hud .gauge { display: flex; flex-direction: column; align-items: flex-start; }
     #hud .gauge b { font-size: 13px; }
     #hud .gauge span { color: var(--muted); font-size: 11px; }
-    #hoverInfo { color: var(--muted); font-size: 11px; max-width: 340px; border-bottom: 1px solid var(--border); padding-bottom: 6px; margin-bottom: 4px; min-height: 18px; }
+    #hoverInfo { color: var(--muted); font-size: 11px; max-width: 340px; border-bottom: 1px solid var(--border); padding-bottom: 6px; margin-bottom: 4px; min-height: 18px; white-space: pre-line; }
     #legend { max-height: 46vh; overflow-y: auto; min-width: 170px; scrollbar-width: none; -ms-overflow-style: none; }
     #legend::-webkit-scrollbar { width: 0; height: 0; }
     #legend .sw { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 8px; vertical-align: middle; }
@@ -53,6 +53,13 @@
     #fpsPanel { top: 14px; left: 14px; min-width: 86px; padding: 6px 10px; display: none; }
     #fpsPanel .label { color: var(--muted); font-size: 10px; letter-spacing: 0; text-transform: uppercase; }
     #fpsPanel .value { display: block; color: var(--fg); font-size: 18px; font-weight: 650; line-height: 1.15; }
+    body.gif-mode #searchbox,
+    body.gif-mode #fpsPanel,
+    body.gif-mode #hud,
+    body.gif-mode #toolbar,
+    body.gif-mode #zoombar,
+    body.gif-mode #toast { display: none !important; }
+    body.gif-mode #graph { cursor: default !important; }
 
     #loading { position: fixed; inset: 0; display: flex; flex-direction: column; gap: 14px; align-items: center; justify-content: center; background: var(--bg); z-index: 50; }
     #loading.hidden { display: none; }
@@ -89,6 +96,7 @@
 
   <div id="toolbar" class="panel">
     <button id="btnOverview" class="active">Overview</button>
+    <button id="btnHive">Hive</button>
     <button id="btnNetwork">Network</button>
     <span class="sep"></span>
     <button id="btnFit">Fit View</button>
@@ -105,6 +113,6 @@
 
   <div class="toast" id="toast"></div>
 
-  <script type="module" src="main.js"></script>
+  <script type="module" src="main.js?v=gif-recording-6"></script>
 </body>
 </html>
