@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Science views — render check</title>
+<!--
+  Renders ONE of the three new science views on its own, against its real dataset.
+
+      python -m http.server 8756            # from this directory
+      http://localhost:8756/check-science-views.html?view=coral
+      http://localhost:8756/check-science-views.html?view=interdisc
+      http://localhost:8756/check-science-views.html?view=evolution
+
+  One page, not three near-duplicate 200-line files: the driver (world transform,
+  legend, hover wiring, font-metric capture, title reporting) is identical for all
+  three and only the module + dataset + probe target differ.
+
+  Why this page exists at all: the Node checks (check-coral.mjs and friends)
+  use a stub measureText that guesses 6.5 px per character. They can prove the
+  geometry and the avoidance algorithm, but they cannot know whether the *real* font
+  makes two labels touch. That question can only be asked of a real canvas.
+
+  Also exercised here and nowhere else: the whole pick -> describe -> #hoverInfo ->
+  togglePinned chain through actual DOM events, and the onChange -> repaint hook that
+  legend clicks depend on (the latent bug fixed alongside these views).
+
+      ?w=1280&h=720     force the CSS size
+      ?k=0.6            force the world scale
+      ?probe=1          synthesise mousemove/click and report the results
+-->
+<style>
+  :root { --bg:#1a1a19; --panel:rgba(8,10,13,0.62); --border:rgba(255,255,255,0.1);
+          --fg:#e6edf3; --muted:#8b949e; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { width:100%; height:100%; overflow:hidden; background:var(--bg);
+              color:var(--fg); font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif; }
+  #graph { position:fixed; inset:0; display:block; width:100%; height:100%; }
+  .panel { position:fixed; z-index:10; background:var(--panel); border:1px solid var(--border);
+           border-radius:8px; padding:10px 14px; backdrop-filter:blur(10px); font-size:12.5px;
+           line-height:1.6; }
+  #hud { bottom:62px; left:14px; display:flex; flex-direction:column; gap:6px; }
+  #hud .hud-row { display:flex; gap:14px; align-items:flex-start; }
+  #hud .gauge { display:flex; flex-direction:column; align-items:flex-start; }
+  #hud .gauge b { font-size:13px; }
+  #hud .gauge span { color:var(--muted); font-size:11px; }
+  #hoverInfo { color:var(--muted); font-size:11px; max-width:340px; min-height:18px;
+               white-space:pre-line; border-bottom:1px solid var(--border);
+               padding-bottom:6px; margin-bottom:4px; }
+  #legend { overflow-y:auto; min-width:170px; max-width:330px; max-height:60vh;
+            scrollbar-width:thin; }
+  #legend::-webkit-scrollbar { width:6px; height:6px; }
+  #legend::-webkit-scrollbar-thumb { background:rgba(255,255,255,0.18); border-radius:3px; }
+  #legend .sw { display:inline-block; width:10px; height:10px; border-radius:50%;
+                margin-right:8px; vertical-align:middle; }
+  #legend .item { cursor:pointer; padding:2px 4px; border-radius:4px; }
+  #legend .item:hover { background:rgba(255,255,255,0.08); }
+  #legend .item.off { opacity:0.3; }
+  #legend .cnt { color:var(--muted); font-size:11px; margin-left:auto; }
+  #legend .row { display:flex; align-items:center; justify-content:space-between; }
+  #err { position:fixed; top:12px; left:12px; right:12px; z-index:60; display:none;
+         background:#2b1113; border:1px solid #6d2b2f; border-radius:8px; padding:10px 14px;
+         font:12px ui-monospace,Consolas,monospace; color:#ffb3b3; white-space:pre-wrap; }
+  #which { position:fixed; top:12px; right:12px; z-index:60; }
+</style>
+</head>
+<body>
+  <canvas id="graph"></canvas>
+
+  <div id="hud" class="panel">
+    <div id="hoverInfo"></div>
+    <div class="hud-row">
+      <div id="gauges" style="display:flex; gap:14px;"></div>
+      <div id="legend"></div>
+    </div>
+  </div>
+
+  <div id="which" class="panel"></div>
+  <div id="err"></div>
+
+<script type="module">
+const WORLD_W = 1600, WORLD_H = 900;   // 与 main.js 一致
+
+const CONFIG = {
+  coral: {
+    // 珊瑚有自己的数据文件（cluster 层的坐标/学科/文章数/概念），
+    // sunburst-data.json 只当第二个参数借术语名 —— 正好复用 crossCheck 那条路。
+    file: './knowledge-coral.js', factory: 'createCoralView',
+    data: './coral-data.json', crossCheck: './sunburst-data.json',
+    bodyClass: 'coral-mode',
+    gauges: (c) => [['Clusters', c.clusterCount], ['Concepts', c.conceptPairs],
+                    ['Nodes', c.nodeCount],
+                    ['Covered', `${c.coveredClusters}/${c.clusterCount}`]],
+  },
+  interdisc: {
+    // 矩阵的主数据源是 sunburst 的 arcs；interdisc-data.json 只当可选的交叉校验源。
+    file: './interdisc-matrix.js', factory: 'createInterdiscView',
+    data: './sunburst-data.json', crossCheck: './interdisc-data.json',
+    bodyClass: 'interdisc-mode',
+    gauges: (c) => [['Disciplines', c.disciplineCount], ['Pairs', c.pairCount],
+                    ['Bridging terms', c.bridgingTerms]],
+  },
+  mycelium: {
+    // 和学科矩阵吃同一份 arcs，但推导的是**纤维**而不是矩阵：Σ C(k,2) = 35,313 根微纤维。
+    // crossCheck 仍是 interdisc-data.json —— 它的 55 个 shared 正好逐对校验逐对的纤维数。
+    file: './mycelium.js', factory: 'createMyceliumView',
+    data: './sunburst-data.json', crossCheck: './interdisc-data.json',
+    bodyClass: 'mycelium-mode',
+    gauges: (c) => [['Disciplines', c.disciplineCount], ['Concept Fibres', c.fibreCount]],
+  },
+  evolution: {
+    // 地质剖面与已退役的河流图共用同一份快照。它没有第二个数据源，所以没有 crossCheck。
+    file: './evolution-strata.js', factory: 'createEvolutionView',
+    data: './openalex-history.json', bodyClass: 'evolution-mode',
+    gauges: (c) => [['Years', c.years], ['Fields', c.fields],
+                    [`Works ${c.topYear}`, c.totalAtTopYear]],
+  },
+};
+
+const q = new URLSearchParams(location.search);
+const which = (q.get('view') || 'coral').toLowerCase();
+const cfg = CONFIG[which];
+const err = document.getElementById('err');
+function fail(what, e) {
+  err.style.display = 'block';
+  err.textContent += `${what}: ${e && (e.stack || e.message) || e}\n`;
+}
+window.addEventListener('error', (e) => fail('error', e.error || e.message));
+window.addEventListener('unhandledrejection', (e) => fail('rejection', e.reason));
+
+if (!cfg) {
+  fail('config', `unknown view "${which}" — use ${Object.keys(CONFIG).join(' | ')}`);
+} else {
+  document.getElementById('which').textContent = `view=${which}`;
+  document.body.classList.add(cfg.bodyClass);
+
+  // 记录每次 fillText，用**浏览器真实字体度量**重建标签盒，检查有没有两个标签叠在一起。
+  // 盒子必须跟着**当时那个变换矩阵**走，不能假设它轴对齐：学科矩阵的列标签是 45° 转的，
+  // 用轴对齐包围盒去量，两条其实相距 36px 的平行斜线会被算成大面积重叠（实测虚报 55 处）。
+  // 所以这里把四个角真的映射过去，再用分离轴定理判相交。
+  const proto = CanvasRenderingContext2D.prototype;
+  const realFillText = proto.fillText;
+  let texts = [];
+  proto.fillText = function (text, x, y) {
+    const m = this.getTransform();
+    const s = String(text);
+    const w = this.measureText(s).width;
+    const x0 = this.textAlign === 'right' ? x - w
+      : this.textAlign === 'center' ? x - w / 2 : x;
+    // 近似字形盒：半高 7 世界 px（世界坐标下的字高都在 11px 上下，两图一致）
+    const corners = [[x0, y - 7], [x0 + w, y - 7], [x0 + w, y + 7], [x0, y + 7]]
+      .map(([px, py]) => [m.a * px + m.c * py + m.e, m.b * px + m.d * py + m.f]);
+    texts.push({ text: s, corners });
+    return realFillText.apply(this, arguments);
+  };
+
+  // 分离轴定理：两个凸四边形不相交 ⟺ 存在一条边的法线，使两者在该轴上的投影不重叠。
+  function satDisjoint(a, b) {
+    for (const poly of [a, b]) {
+      for (let i = 0; i < 4; i++) {
+        const p = poly[i], q = poly[(i + 1) % 4];
+        const nx = -(q[1] - p[1]), ny = q[0] - p[0];
+        const len = Math.hypot(nx, ny);
+        if (!len) continue;
+        const ax = nx / len, ay = ny / len;
+        let aMin = Infinity, aMax = -Infinity, bMin = Infinity, bMax = -Infinity;
+        for (const [px, py] of a) { const d = px * ax + py * ay; if (d < aMin) aMin = d; if (d > aMax) aMax = d; }
+        for (const [px, py] of b) { const d = px * ax + py * ay; if (d < bMin) bMin = d; if (d > bMax) bMax = d; }
+        if (aMax <= bMin + 1 || bMax <= aMin + 1) return true;   // 留 1px 容差
+      }
+    }
+    return false;
+  }
+
+  function overlapDepth(a, b) {
+    // 只用来排序/报数：用重叠面积的近似值（在两边的最小宽度轴上取重叠长度）
+    let best = Infinity;
+    for (const poly of [a, b]) {
+      for (let i = 0; i < 4; i++) {
+        const p = poly[i], q = poly[(i + 1) % 4];
+        const nx = -(q[1] - p[1]), ny = q[0] - p[0];
+        const len = Math.hypot(nx, ny);
+        if (!len) continue;
+        const ax = nx / len, ay = ny / len;
+        let aMin = Infinity, aMax = -Infinity, bMin = Infinity, bMax = -Infinity;
+        for (const [px, py] of a) { const d = px * ax + py * ay; if (d < aMin) aMin = d; if (d > aMax) aMax = d; }
+        for (const [px, py] of b) { const d = px * ax + py * ay; if (d < bMin) bMin = d; if (d > bMax) bMax = d; }
+        best = Math.min(best, Math.min(aMax, bMax) - Math.max(aMin, bMin));
+      }
+    }
+    return best;
+  }
+
+  function labelOverlaps() {
+    const out = [];
+    for (let i = 0; i < texts.length; i++) {
+      for (let j = i + 1; j < texts.length; j++) {
+        // 珊瑚给每个学科名画**两遍**（先 0.6px 偏移的暗色描边垫底，再画彩色正文），
+        // 两遍必然相交 —— 实测报出来的是 "Biology / Biology (13.4px)" 这种自撞。
+        // 那是**一个**标签，不是两个标签叠了，所以同名且几乎重合的一对跳过。
+        // 用 text 相等做判据是安全的：两个不同学科的标签文字不可能相同（11 个名字互异），
+        // 所以真正的遮挡一个也不会被这条漏掉。没有画描边的视图（interdisc / mycelium）
+        // 根本不会产生同名对，这条对它们是空操作。
+        if (texts[i].text === texts[j].text
+          && Math.hypot(texts[i].corners[0][0] - texts[j].corners[0][0],
+            texts[i].corners[0][1] - texts[j].corners[0][1]) < 3) continue;
+        if (satDisjoint(texts[i].corners, texts[j].corners)) continue;
+        out.push(`${texts[i].text} / ${texts[j].text} (${overlapDepth(texts[i].corners, texts[j].corners).toFixed(1)}px)`);
+      }
+    }
+    return out;
+  }
+
+  const fixedW = +(q.get('w') || 0), fixedH = +(q.get('h') || 0), fixedK = +(q.get('k') || 0);
+  const canvas = document.getElementById('graph');
+  const ctx = canvas.getContext('2d');
+  let dpr = 1, cssW = 0, cssH = 0, k = 1, tx = 0, ty = 0;
+  let paints = 0;
+
+  const mod = await import(cfg.file);
+  const view = mod[cfg.factory]({ onChange: () => paint() });   // §4：图例点击要能触发重画
+
+  function paint() {
+    paints++;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, cssW, cssH);
+    // 世界变换：与 host 的 render() 一样，draw 收到的是世界坐标下的 k。
+    ctx.translate(tx, ty);
+    ctx.scale(k, k);
+    texts = [];
+    try {
+      view.draw(ctx, WORLD_W, WORLD_H, k);
+    } catch (e) {
+      fail('draw', e);
+    }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    // 只重写 #gauges 本身 —— #legend 是它的**兄弟节点**。早先把 legend 拼进这段
+    // HTML 里，于是每画一帧就把 legend 的 innerHTML 连同内容一起清掉了。
+    const counts = view.getCounts && view.getCounts();
+    if (counts && cfg.gauges) {
+      document.getElementById('gauges').innerHTML = cfg.gauges(counts)
+        .map(([label, value]) => `<div class="gauge"><b>${Number(value).toLocaleString()}</b>`
+          + `<span>${label}</span></div>`).join('');
+    }
+    const clashes = labelOverlaps();
+    document.title = `view=${which} overlaps=${clashes.length} labels=${texts.length} `
+      + `size=${cssW}x${cssH} k=${k.toFixed(3)} paints=${paints}`;
+    if (clashes.length) fail('label overlap', clashes.slice(0, 4).join('; '));
+  }
+
+  // ?time=1 —— 每帧到底花多少时间？这些图都是「鼠标一动就整幅重画」（requestRender →
+  // 一次 rAF），所以一帧的耗时**就是**交互的卡顿程度。Node 里的 harness 量不到这个：
+  // 它用的是替身 ctx，一个 op 也不真的光栅化。只有真 canvas 能回答"卡不卡"。
+  // 报的是中位数，不是均值 —— 第一帧要建缓存，均值会被它带偏。
+  function timeDraw(n = 30) {
+    // 校准：先给一个**已知很慢**的纯 JS 循环计时。headless 的 --virtual-time-budget 会把
+    // 时钟冻住（同步代码不推进虚拟时间），于是所有 delta 都是 0 —— 那不是"很快"，
+    // 是"量不到"。带上这个数，才分得清两者。
+    const c0 = performance.now();
+    let acc = 0;
+    for (let i = 0; i < 3e7; i++) acc += i;
+    const cal = performance.now() - c0;
+    const t = [];
+    for (let i = 0; i < n; i++) {
+      const t0 = performance.now();
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, cssW, cssH);
+      ctx.translate(tx, ty);
+      ctx.scale(k, k);
+      view.draw(ctx, WORLD_W, WORLD_H, k);
+      // **必须**读一个像素：canvas 的绘制调用是异步的，不这样量到的是「录制命令」的时间
+      // （第一次跑出来 med=0.0ms，两张图都是，就是因为没同步）。getImageData 会把整条
+      // 光栅化管线逼到完成，这时的时间才是"这一帧到底卡不卡"。
+      ctx.getImageData(0, 0, 1, 1);
+      t.push(performance.now() - t0);
+    }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    t.sort((a, b) => a - b);
+    return { med: t[Math.floor(n / 2)], p90: t[Math.floor(n * 0.9)], min: t[0], max: t[n - 1], cal };
+  }
+
+  function resize() {
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    cssW = fixedW || innerWidth;
+    cssH = fixedH || innerHeight;
+    canvas.width = Math.floor(cssW * dpr);
+    canvas.height = Math.floor(cssH * dpr);
+    canvas.style.width = cssW + 'px';
+    canvas.style.height = cssH + 'px';
+    // 取景与 host 的 fitView 一致：整体世界塞进窗口、居中。
+    k = fixedK || Math.min(cssW / WORLD_W, cssH / WORLD_H);
+    tx = cssW / 2 - (WORLD_W / 2) * k;
+    ty = cssH / 2 - (WORLD_H / 2) * k;
+    paint();
+  }
+
+  const toWorld = (ev) => {
+    const r = canvas.getBoundingClientRect();
+    return [(ev.clientX - r.left - tx) / k, (ev.clientY - r.top - ty) / k];
+  };
+  const info = () => document.getElementById('hoverInfo').textContent.split('\n')[0];
+
+  canvas.addEventListener('mousemove', (ev) => {
+    const [wx, wy] = toWorld(ev);
+    const hit = view.pick(wx, wy);
+    if (view.sameTarget(hit, view.getHover())) return;
+    view.setHover(hit);
+    document.getElementById('hoverInfo').textContent =
+      hit ? view.describe(hit) : view.describe(view.getPinned());
+    paint();
+  });
+  canvas.addEventListener('click', (ev) => {
+    const [wx, wy] = toWorld(ev);
+    view.togglePinned(view.pick(wx, wy));
+    document.getElementById('hoverInfo').textContent =
+      view.describe(view.getPinned() || view.getHover());
+    paint();
+  });
+  canvas.addEventListener('mouseleave', () => { view.setHover(null); paint(); });
+  window.addEventListener('resize', resize);
+
+  try {
+    const load = async (f) => {
+      const res = await fetch(f, { cache: 'no-store' });
+      if (!res.ok) throw new Error(`${f} -> HTTP ${res.status}`);
+      return res.json();
+    };
+    if (cfg.crossCheck) {
+      // 学科矩阵：主源是 sunburst-data.json，第二个文件只做交叉校验（缺了也能画）
+      let cross = null;
+      try { cross = await load(cfg.crossCheck); } catch { cross = null; }
+      view.setData(await load(cfg.data), cross);
+    } else {
+      view.setData(await load(cfg.data));
+    }
+    view.renderLegend(document.getElementById('legend'));
+    resize();
+
+    // ?probe=1：合成真实的 mousemove/click，把 pick -> describe -> #hoverInfo ->
+    // togglePinned 整条链在浏览器里跑一遍。Node 的 .mjs 只能测到 pick/describe
+    // 本身，测不到事件处理器与 DOM 之间的那段接线。
+    if (q.has('probe')) {
+      const at = (wx, wy) => [tx + wx * k, ty + wy * k];
+      const send = (type, [cx, cy]) => canvas.dispatchEvent(
+        new MouseEvent(type, { clientX: cx, clientY: cy, bubbles: true }));
+
+      // 每种图的「一定会命中某个东西」的点。用布局自己给出的坐标，不猜屏幕位置。
+      let spot;
+      const g = which === 'interdisc' ? view.getModel() : view.layout;
+      if (which === 'coral') {
+        // 主干第一个节点（根的第一个孩子，实测背 97.7% 的文章）。用**模型自己给的**世界
+        // 坐标，不猜屏幕位置 —— 它一定在画面上，也一定落在 PICK_R 里。
+        // 点枝条 = 钉住，再点 = 取消，正好是这一段要验的东西。
+        const mm = view.getModel();
+        spot = at(mm.gx[1], mm.gy[1]);
+      } else if (which === 'mycelium') {
+        // 源场中心。点场 = 聚焦（高亮它的纤维），正好是这一段要验的
+        // 「点一下钉住、再点一下取消」；点纤维也能钉住，但那要求精确命中一根线。
+        const fx = view.fields[0];
+        spot = at(fx.x, fx.y);
+      } else if (which === 'interdisc') {
+        // 上沿第一根 OUTWARD 条的中点。**不能**用矩阵格：点格是下钻（进 L1），
+        // 而这一段要验的是「点一下钉住、再点一下取消」，所以必须选一个点击 = 高亮的目标。
+        const b = g.outBars[0];
+        spot = at(b.x + b.w / 2, b.y + b.h / 2);
+      } else if (which === 'evolution') {
+        // 最上面那一层（2024）的第一条带的中点。用布局自己给的 xl/xr 与上下边界，
+        // 不猜屏幕位置 —— 它一定在画面上，也一定落在那条带里。
+        const t = view.years.length - 1;
+        const b = view.bands[0];
+        spot = at((b.xl[t] + b.xr[t]) / 2, (g.yOfBot(t) + g.yOfTop(t)) / 2);
+      } else {
+        const b = view.bands[0];
+        const t = view.years.length - 1;
+        spot = at(g.x0 + t * g.step, (b.top[t] + b.bot[t]) / 2);
+      }
+
+      send('mousemove', spot);
+      const hovered = info();
+      send('click', spot);
+      const pinned = view.getPinned() !== null;
+      const pinText = info();
+      send('click', spot);
+      const unpinned = view.getPinned() === null;
+      send('mousemove', at(-400, -400));
+      const empty = info();
+
+      // §4 的那个潜伏 bug：图例点击必须触发重画。模块自己调 onChange，
+      // host 传的是 requestRender。这里数的就是「画布有没有真的重画」。
+      const beforeLegend = paints;
+      // 各种图的图例行挂的钩子不同：学科矩阵用 data-dom，地层用 data-key
+      //（而且只有 Other 那行可点），菌丝图用 data-field，珊瑚用 data-disc。
+      const row = document.querySelector(
+        '#legend [data-dom], #legend [data-node], #legend [data-key], #legend [data-field],'
+        + ' #legend [data-disc]');
+      let legendRepainted = null, legendLabel = null;
+      if (row) {
+        legendLabel = row.textContent.trim().slice(0, 24);
+        row.click();
+        legendRepainted = paints > beforeLegend;
+      }
+
+      document.title = `probe hovered="${hovered}" pinned=${pinned} pin="${pinText}" `
+        + `unpinned=${unpinned} empty="${empty}" legendRow="${legendLabel}" `
+        + `legendRepainted=${legendRepainted} | ` + document.title;
+    }
+    if (q.has('time')) {
+      const tm = timeDraw(+(q.get('n') || 30));
+      document.title = `draw med=${tm.med.toFixed(1)}ms p90=${tm.p90.toFixed(1)}ms `
+        + `min=${tm.min.toFixed(1)} max=${tm.max.toFixed(1)} calib=${tm.cal.toFixed(1)}ms | `
+        + document.title;
+    }
+  } catch (e) {
+    fail('load', e);
+  }
+}
+</script>
+</body>
+</html>
