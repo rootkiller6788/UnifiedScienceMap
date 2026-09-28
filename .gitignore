@@ -45,6 +45,11 @@ package-lock.json
 #   map_of_science   (dsonyy/map_of_science)                        → build-science-views-data.mjs 读其 data.tsv / keys.tsv
 #   science-map      (Science-Integrity-Alliance/science-map)       → build-ucsd-map-data.mjs 读其 .net.txt（CC BY-NC-SA 3.0，注意非商业）
 # Philpapers-API 不是上游供体，是本地自建工程，直接入库。
+# 但它目录下两件本地杂物仍不入库：1.txt 是抓下来未经处理的原始 payload
+# （单行 JSON，284KB；项目自己的政策也是 data/ 与 output/ 一律不提交），
+# chord-shot.png 是截图。
+/Philpapers-API/1.txt
+/Philpapers-API/chord-shot.png
 
 # 临时工作目录：gif/hive 录制帧、CDP 浏览器 profile
 /.tmp-*/

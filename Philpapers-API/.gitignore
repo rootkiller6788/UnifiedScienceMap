@@ -1,0 +1,18 @@
+# Virtual environment
+.venv/
+venv/
+
+# Derived / source data — never commit.
+# PhilPapers data is not redistributable; keep it local only.
+data/
+output/
+data.json
+PhilpapersTaxonomy.txt
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# OS
+.DS_Store
