@@ -29,6 +29,29 @@
     #hoverInfo { color: var(--muted); font-size: 11px; max-width: 340px; border-bottom: 1px solid var(--border); padding-bottom: 6px; margin-bottom: 4px; min-height: 18px; white-space: pre-line; }
     #legend { max-height: 46vh; overflow-y: auto; min-width: 170px; scrollbar-width: none; -ms-overflow-style: none; }
     #legend::-webkit-scrollbar { width: 0; height: 0; }
+    /* The chord view has more to say than the other modes, and hiding its scrollbar
+       would strand the accounting footnote where the reader cannot reach it. It gets
+       a capped width (so it stops covering the ring) and a real scrollbar. */
+    body.philosophy-mode #legend,
+    body.coral-mode #legend,
+    body.interdisc-mode #legend,
+    body.mycelium-mode #legend,
+    body.evolution-mode #legend,
+    body.alluvial-mode #legend { max-width: 300px; max-height: 60vh; scrollbar-width: thin; }
+    body.philosophy-mode #legend::-webkit-scrollbar,
+    body.coral-mode #legend::-webkit-scrollbar,
+    body.interdisc-mode #legend::-webkit-scrollbar,
+    body.mycelium-mode #legend::-webkit-scrollbar,
+    body.evolution-mode #legend::-webkit-scrollbar,
+    body.alluvial-mode #legend::-webkit-scrollbar { width: 6px; height: 6px; }
+    body.philosophy-mode #legend::-webkit-scrollbar-thumb,
+    body.coral-mode #legend::-webkit-scrollbar-thumb,
+    body.interdisc-mode #legend::-webkit-scrollbar-thumb,
+    body.mycelium-mode #legend::-webkit-scrollbar-thumb,
+    body.evolution-mode #legend::-webkit-scrollbar-thumb,
+    body.alluvial-mode #legend::-webkit-scrollbar-thumb {
+      background: rgba(255,255,255,0.18); border-radius: 3px;
+    }
     #legend .sw { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 8px; vertical-align: middle; }
     #legend .item { cursor: pointer; padding: 2px 4px; border-radius: 4px; }
     #legend .item:hover { background: rgba(255,255,255,0.08); }
@@ -36,7 +59,11 @@
     #legend .cnt { color: var(--muted); font-size: 11px; margin-left: auto; }
     #legend .row { display: flex; align-items: center; justify-content: space-between; }
 
-    #toolbar { bottom: 14px; right: 14px; display: flex; gap: 8px; }
+    /* Eleven mode buttons plus Fit is wider than 1280px, so the row wraps instead of
+       running off the left edge. flex-end keeps the last line flush right — and the
+       separator would otherwise end up alone at the start of a wrapped line. */
+    #toolbar { bottom: 14px; right: 14px; display: flex; flex-wrap: wrap;
+               justify-content: flex-end; gap: 8px; max-width: calc(100vw - 28px); }
     #toolbar button { background: rgba(255,255,255,0.06); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 6px 12px; cursor: pointer; font-size: 12px; }
     #toolbar button:hover { background: rgba(255,255,255,0.12); }
     #toolbar button.active { background: rgba(255,255,255,0.86); border-color: rgba(255,255,255,0.92); color: #030303; font-weight: 600; }
@@ -45,6 +72,14 @@
     #zoombar { bottom: 14px; left: 14px; padding: 4px; }
     #zoombar button { width: 32px; height: 32px; font-size: 20px; line-height: 1; background: rgba(255,255,255,0.06); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; cursor: pointer; }
     #zoombar button:hover { background: rgba(255,255,255,0.12); }
+
+    /* The three science maps (Atlas / UCSD / Alluvial) carry no bottom-left panel at
+       all. Its Subjects list sat on top of the terrain, covering the map to restate
+       what the map already shows; the gauges and the legend still appear in
+       overview/hive. The "-" toggle goes with it, since the only thing it toggled
+       was this panel. */
+    body.science-mode #hud,
+    body.science-mode #zoombar { display: none; }
 
     #searchbox { top: 14px; right: 14px; width: 220px; }
     #searchbox input { width: 100%; background: rgba(0,0,0,0.35); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 7px 10px; font-size: 12.5px; outline: none; }
@@ -97,6 +132,14 @@
   <div id="toolbar" class="panel">
     <button id="btnOverview" class="active">Overview</button>
     <button id="btnHive">Hive</button>
+    <button id="btnAtlas">Atlas</button>
+    <button id="btnAlluvial">Strata</button>
+    <button id="btnUCSD">UCSD</button>
+    <button id="btnPhilosophy">Philosophy</button>
+    <button id="btnCoral">Coral</button>
+    <button id="btnInterdisc">Interdisc</button>
+    <button id="btnMycelium">Mycelium</button>
+    <button id="btnEvolution">Evolution</button>
     <button id="btnNetwork">Network</button>
     <span class="sep"></span>
     <button id="btnFit">Fit View</button>
@@ -113,6 +156,6 @@
 
   <div class="toast" id="toast"></div>
 
-  <script type="module" src="main.js?v=gif-recording-6"></script>
+  <script type="module" src="main.js?v=interdisc-back-2"></script>
 </body>
 </html>
