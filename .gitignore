@@ -32,12 +32,12 @@ package-lock.json
 /web/interdisc-data.json
 /web/coral-data.json
 
-# 同上的另外四份图数据（Atlas 2.9MB / UCSD 97KB / OpenAlex 33KB / PhilPapers 125KB）。
-# 前三份由 scripts/build-*-data.mjs 从数据源现算，PhilPapers 那份由 fetch 脚本在线抓，
-# 都与上面三件套同一政策：派生物不入库，本地重新生成。
+# 同上的另外三份图数据（Atlas 2.9MB / UCSD 97KB / PhilPapers 125KB）。前两份由
+# scripts/build-*-data.mjs 从数据源现算，PhilPapers 那份要先抓快照再跑 Philpapers-API
+# 的 pipeline，都与上面三件套同一政策：派生物不入库，本地重新生成。
+# openalex-history.json 是例外，见上：只有 34KB 且必须联网才能取到，离线复现不了，所以入库。
 /web/science-atlas-data.json
 /web/ucsd-science-map.json
-/web/openalex-history.json
 /web/philpapers-chord.json
 
 # 上游第三方仓库的本地克隆，只作为数据源：
