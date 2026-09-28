@@ -837,10 +837,10 @@ external/
   cslib/                  Imported source tree with history
   physlib/                Imported source tree with history
 
-source clones (gitignored — clone them locally to rebuild the data above)
+vendored source trees (imported with `git subtree add`, upstream history kept)
   map_of_science/         dsonyy/map_of_science            → Atlas, Coral, Interdisc, Mycelium
   science-map/            Science-Integrity-Alliance/science-map   → UCSD
-  Philpapers-API/         BassP97/Philpapers-API           → Philosophy
+  Philpapers-API/         this repository's own taxonomy pipeline  → Philosophy
 ```
 
 ## Design Direction
@@ -908,11 +908,14 @@ The 2010 UCSD Map of Science (567 subdisciplines, 2,276 edges) behind the UCSD v
   System: The UCSD Map of Science.* PLoS ONE 7(7): e39464.
   <https://doi.org/10.1371/journal.pone.0039464>
 
-**BassP97/Philpapers-API** — <https://github.com/BassP97/Philpapers-API>
+**PhilPapers taxonomy pipeline** — `Philpapers-API/` in this repository
 The PhilPapers taxonomy pipeline (6,135 categories, 8 levels) behind the Philosophy
 chord view.
 
-- Pipeline by [BassP97](https://github.com/BassP97).
+- The pipeline is this repository's own code. It only inherited its directory layout
+  from [BassP97/Philpapers-API](https://github.com/BassP97) (a 2020 JSON-API
+  rewrite); none of that project's files remain in the tree, so its history is
+  deliberately *not* vendored and its author is not credited here.
 - The taxonomy is © the [PhilPapers Foundation](https://philpapers.org), whose terms
   **severely restrict redistribution** — that is exactly why `philpapers-chord.json`
   is gitignored, and why this view is for personal, local research use.
