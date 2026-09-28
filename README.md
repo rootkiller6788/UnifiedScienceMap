@@ -818,6 +818,9 @@ web/
   coral-data.json         Generated (4.6 MB, gitignored): the 85,643-cluster tier
   interdisc-data.json     Generated (10 KB, gitignored — see above)
   openalex-history.json   Committed OpenAlex snapshot (34 KB)
+  science-atlas-data.json Generated (2.9 MB, gitignored): Atlas — 11 domains → topics
+  ucsd-science-map.json   Generated (97 KB, gitignored): the 2010 UCSD map
+  philpapers-chord.json   Generated (125 KB, gitignored): must not be redistributed
 
 scripts/
   build-addon-decls.mjs   Shared extractor for addon Lean repositories
@@ -825,13 +828,19 @@ scripts/
   build-unified-decls.mjs Unified dataset builder
   build-science-views-data.mjs Sunburst + interdisc + coral data (one pass, three files)
   fetch-openalex-history.mjs   One-shot OpenAlex snapshot (shared by River and Evolution)
-  build-science-atlas-data.mjs Atlas/UCSD data (imports science-categories.mjs)
+  build-science-atlas-data.mjs Atlas data (imports science-categories.mjs)
+  build-ucsd-map-data.mjs UCSD map: science-map's .net file → JSON
   science-categories.mjs  The 11 cluster_category names by id, plus palettes
 
 external/
   SciLean/                Imported source tree with history
   cslib/                  Imported source tree with history
   physlib/                Imported source tree with history
+
+vendored source trees (imported with `git subtree add`, upstream history kept)
+  map_of_science/         dsonyy/map_of_science            → Atlas, Coral, Interdisc, Mycelium
+  science-map/            Science-Integrity-Alliance/science-map   → UCSD
+  Philpapers-API/         this repository's own taxonomy pipeline  → Philosophy
 ```
 
 ## Design Direction
@@ -855,3 +864,65 @@ This project builds on public Lean ecosystem work, including:
 - the imported `physlib` source tree in this repository
 
 Original commits imported into `external/` retain their historical authorship in Git.
+
+### Science-map data sources
+
+The science-wide views (Atlas, Strata, UCSD, Philosophy, Coral, Interdisc,
+Mycelium, Evolution) read data that comes from public research maps rather than
+from the Lean ecosystem. None of that derived data is redistributed here — every
+such file is gitignored and rebuilt locally by the scripts in `scripts/` — but the
+sources and the people behind them are credited below. Three of these are entire
+upstream repositories, cloned locally and gitignored (see the layout above).
+
+**map_of_science** — <https://github.com/dsonyy/map_of_science>
+The 85,643-cluster tier behind Atlas (11 disciplines), Coral, Interdisc and Mycelium.
+
+- Code by [dsonyy](https://github.com/dsonyy) and
+  [dr-trondheim](https://github.com/dr-trondheim), with
+  [wujekbogdan](https://github.com/wujekbogdan). ISC.
+- The dataset is the **CSET Map of Science**, built by the
+  [Emerging Technology Observatory](https://sciencemap.eto.tech/?mode=map) from
+  hundreds of millions of publications organized into 85,000+ research clusters:
+  > Melot, J., Arnold, Z., Gelles, R., Quinn, K., Rahkovsky, I., & Toney-Wails, A.
+  > (2024). *CSET Map of Science* [Data set]. Zenodo.
+  > <https://doi.org/10.5281/zenodo.12628195> — **CC BY 4.0**
+
+**Science-Integrity-Alliance/science-map** — <https://github.com/Science-Integrity-Alliance/science-map>
+The 2010 UCSD Map of Science (567 subdisciplines, 2,276 edges) behind the UCSD view.
+
+- Interactive replication by Luciana Machado
+  ([machadolac](https://github.com/machadolac)).
+- The map itself is by SciTech Strategies, Inc. and the Cyberinfrastructure for
+  Network Science Center at Indiana University: **Katy Börner, Richard Klavans,
+  Michael Patek, Angela M. Zoss, Joseph R. Biberstine, Robert P. Light,
+  Vincent Larivière and Kevin W. Boyack.**
+- **License: CC BY-NC-SA 3.0 — non-commercial and share-alike.** The UCSD view may
+  not be used commercially.
+- Required acknowledgment:
+  > The authors wish to acknowledge The Regents of the University of California,
+  > SciTech Strategies, Observatoire des Sciences et des Technologies, and the
+  > Cyberinfrastructure for Network Science Center for making the 2010 UCSD Map of
+  > Science and Classification System available for this work.
+- Cite: Börner, K., Klavans, R., Patek, M., Zoss, A.M., Biberstine, J.R., Light, R.,
+  Larivière, V., & Boyack, K.W. (2012). *Design and Update of a Classification
+  System: The UCSD Map of Science.* PLoS ONE 7(7): e39464.
+  <https://doi.org/10.1371/journal.pone.0039464>
+
+**PhilPapers taxonomy pipeline** — `Philpapers-API/` in this repository
+The PhilPapers taxonomy pipeline (6,135 categories, 8 levels) behind the Philosophy
+chord view.
+
+- The pipeline is this repository's own code. It only inherited its directory layout
+  from [BassP97/Philpapers-API](https://github.com/BassP97) (a 2020 JSON-API
+  rewrite); none of that project's files remain in the tree, so its history is
+  deliberately *not* vendored and its author is not credited here.
+- The taxonomy is © the [PhilPapers Foundation](https://philpapers.org), whose terms
+  **severely restrict redistribution** — that is exactly why `philpapers-chord.json`
+  is gitignored, and why this view is for personal, local research use.
+- The snapshot is read from a third-party copy (`rookslog/sophotron`), not from
+  `philpapers.org`, whose `robots.txt` forbids automated collection.
+
+**OpenAlex** — <https://openalex.org>
+The yearly per-field publication counts behind the Evolution view (and the retired
+River view), fetched by `scripts/fetch-openalex-history.mjs`. OpenAlex data is CC0;
+the 34 KB snapshot is committed so the repository keeps working offline.

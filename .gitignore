@@ -32,22 +32,24 @@ package-lock.json
 /web/interdisc-data.json
 /web/coral-data.json
 
-# 同上的另外四份图数据（Atlas 2.9MB / UCSD 97KB / OpenAlex 33KB / PhilPapers 125KB）。
-# 前三份由 scripts/build-*-data.mjs 从数据源现算，PhilPapers 那份由 fetch 脚本在线抓，
-# 都与上面三件套同一政策：派生物不入库，本地重新生成。
+# 同上的另外三份图数据（Atlas 2.9MB / UCSD 97KB / PhilPapers 125KB）。前两份由
+# scripts/build-*-data.mjs 从数据源现算，PhilPapers 那份要先抓快照再跑 Philpapers-API
+# 的 pipeline，都与上面三件套同一政策：派生物不入库，本地重新生成。
+# openalex-history.json 是例外，见上：只有 34KB 且必须联网才能取到，离线复现不了，所以入库。
 /web/science-atlas-data.json
 /web/ucsd-science-map.json
-/web/openalex-history.json
 /web/philpapers-chord.json
 
-# 上游第三方仓库的本地克隆，只作为数据源：
+# 上游第三方仓库：map_of_science 与 science-map 已用 `git subtree add` 并入本仓库，
+# 连同上游的完整提交历史与原作者（Contributors 面板要的就是这个），因此不再忽略。
 #   map_of_science   (dsonyy/map_of_science)                        → build-science-views-data.mjs 读其 data.tsv / keys.tsv
 #   science-map      (Science-Integrity-Alliance/science-map)       → build-ucsd-map-data.mjs 读其 .net.txt（CC BY-NC-SA 3.0，注意非商业）
-#   Philpapers-API   (BassP97/Philpapers-API)                       → 抓取 PhilPapers 分类树
-# 自己的代码不入库，需要时各自 clone。
-/map_of_science/
-/science-map/
-/Philpapers-API/
+# Philpapers-API 不是上游供体，是本地自建工程，直接入库。
+# 但它目录下两件本地杂物仍不入库：1.txt 是抓下来未经处理的原始 payload
+# （单行 JSON，284KB；项目自己的政策也是 data/ 与 output/ 一律不提交），
+# chord-shot.png 是截图。
+/Philpapers-API/1.txt
+/Philpapers-API/chord-shot.png
 
 # 临时工作目录：gif/hive 录制帧、CDP 浏览器 profile
 /.tmp-*/
