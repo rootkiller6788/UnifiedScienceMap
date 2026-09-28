@@ -20,3 +20,38 @@ package-lock.json
 
 # 生成的声明地图数据（18MB，勿提交；本地运行 extract/extract-decls.mjs 生成）
 /web/decls.json
+
+# map_of_science 的图数据（Sunburst 9.3MB / Interdisc 8KB / Coral 4.6MB，勿提交；
+# 本地运行 node scripts/build-science-views-data.mjs 生成，三个文件一次产出）。
+# 9.3MB 里 5.7MB 是 274,422 个主题名（真实英文短语，如 "Weyl nodal line"），
+# 是悬停要显示的内容，删不掉；已实测 gzip 可到 3.09MB，但那份要配
+# DecompressionStream，本次没做。
+# coral-data.json 是第三层（85,643 个 cluster 的真实坐标/学科/文章数/概念下标）——
+# 这是**原始数据本身**，不是派生物，所以更不能提交。
+/web/sunburst-data.json
+/web/interdisc-data.json
+/web/coral-data.json
+
+# 同上的另外四份图数据（Atlas 2.9MB / UCSD 97KB / OpenAlex 33KB / PhilPapers 125KB）。
+# 前三份由 scripts/build-*-data.mjs 从数据源现算，PhilPapers 那份由 fetch 脚本在线抓，
+# 都与上面三件套同一政策：派生物不入库，本地重新生成。
+/web/science-atlas-data.json
+/web/ucsd-science-map.json
+/web/openalex-history.json
+/web/philpapers-chord.json
+
+# 上游第三方仓库的本地克隆，只作为数据源：
+#   map_of_science   (dsonyy/map_of_science)                        → build-science-views-data.mjs 读其 data.tsv / keys.tsv
+#   science-map      (Science-Integrity-Alliance/science-map)       → build-ucsd-map-data.mjs 读其 .net.txt（CC BY-NC-SA 3.0，注意非商业）
+#   Philpapers-API   (BassP97/Philpapers-API)                       → 抓取 PhilPapers 分类树
+# 自己的代码不入库，需要时各自 clone。
+/map_of_science/
+/science-map/
+/Philpapers-API/
+
+# 临时工作目录：gif/hive 录制帧、CDP 浏览器 profile
+/.tmp-*/
+
+# 本地调试与截图产物。约定：web/ 下 `_` 前缀即临时文件
+# （41 张截图 / diag / probe / mut-main 等，约 21.6MB，全部可重新生成）
+/web/_*

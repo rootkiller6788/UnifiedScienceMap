@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Alluvial view — render check</title>
+<!--
+  Renders alluvial-chart.js on its own, against the real unified-decls.json.
+
+  The full app pulls the same 54 MB dataset but then also builds the network, the GL
+  renderer and the legends before it paints anything, which makes it a slow and flaky
+  way to look at this one view. This page loads only the alluvial chart, so it paints
+  as soon as the JSON parses and can be opened directly while iterating.
+
+  It is a mirror of the host app's call sequence (switchMode -> renderLegend -> draw
+  inside the world transform), so if the view works here but not there, the problem is
+  the wiring in main.js, not the renderer.
+
+      python -m http.server 8756      # from this directory
+      open http://localhost:8756/check-alluvial.html
+
+  Why this page exists at all: Node's check-alluvial.mjs uses a stub measureText that
+  guesses 6.5 px per character. It can prove the avoidance algorithm separates every
+  overlapping pair, but it cannot know whether the *real* font makes two labels touch.
+  That question can only be asked of a real canvas.
+-->
+<style>
+  :root { --bg:#000; --panel:rgba(8,10,13,0.62); --border:rgba(255,255,255,0.1);
+          --fg:#e6edf3; --muted:#8b949e; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { width:100%; height:100%; overflow:hidden; background:var(--bg);
+              color:var(--fg); font-family:-apple-system,"Segoe UI",sans-serif; }
+  #graph { position:fixed; inset:0; display:block; width:100%; height:100%; }
+  .panel { position:fixed; z-index:10; background:var(--panel); border:1px solid var(--border);
+           border-radius:8px; padding:10px 14px; backdrop-filter:blur(10px); font-size:12.5px;
+           line-height:1.6; }
+  #hud { bottom:62px; left:14px; display:flex; flex-direction:column; gap:6px; }
+  #hud .hud-row { display:flex; gap:14px; align-items:flex-start; }
+  #hud .gauge { display:flex; flex-direction:column; align-items:flex-start; }
+  #hud .gauge b { font-size:13px; }
+  #hud .gauge span { color:var(--muted); font-size:11px; }
+  #hoverInfo { color:var(--muted); font-size:11px; max-width:340px; min-height:18px;
+               white-space:pre-line; border-bottom:1px solid var(--border);
+               padding-bottom:6px; margin-bottom:4px; }
+  #legend { overflow-y:auto; min-width:170px; max-height:60vh; scrollbar-width:thin; }
+  #legend::-webkit-scrollbar { width:6px; height:6px; }
+  #legend::-webkit-scrollbar-thumb { background:rgba(255,255,255,0.18); border-radius:3px; }
+  #legend .sw { display:inline-block; width:10px; height:10px; border-radius:50%;
+                margin-right:8px; vertical-align:middle; }
+  #legend .item { cursor:pointer; padding:2px 4px; border-radius:4px; }
+  #legend .item:hover { background:rgba(255,255,255,0.08); }
+  #legend .item.off { opacity:0.3; }
+  #legend .cnt { color:var(--muted); font-size:11px; margin-left:auto; }
+  #legend .row { display:flex; align-items:center; justify-content:space-between; }
+  #err { position:fixed; top:12px; left:12px; right:12px; z-index:60; display:none;
+         background:#2b1113; border:1px solid #6d2b2f; border-radius:8px; padding:10px 14px;
+         font:12px ui-monospace,Consolas,monospace; color:#ffb3b3; white-space:pre-wrap; }
+</style>
+</head>
+<body>
+  <canvas id="graph"></canvas>
+
+  <div id="hud" class="panel">
+    <div id="hoverInfo"></div>
+    <div class="hud-row">
+      <div class="gauge"><b id="nodeCount">-</b><span>Declarations</span></div>
+      <div class="gauge"><b id="edgeCount">-</b><span>Ribbons</span></div>
+      <div id="legend"></div>
+    </div>
+  </div>
+
+  <div id="err"></div>
+
+<script type="module">
+import { createAlluvialView } from './alluvial-chart.js';
+
+const WORLD_W = 1600, WORLD_H = 900;   // 与 main.js 一致
+
+const err = document.getElementById('err');
+function fail(what, e) {
+  err.style.display = 'block';
+  err.textContent += `${what}: ${e && (e.stack || e.message) || e}\n`;
+}
+window.addEventListener('error', (e) => fail('error', e.error || e.message));
+window.addEventListener('unhandledrejection', (e) => fail('rejection', e.reason));
+
+// 记录每次 fillText，用**浏览器真实字体度量**重建标签盒，检查有没有两个标签叠在一起。
+// 坐标是世界坐标（draw 在世界变换里被调用），字体宽度也是世界坐标下的宽度，两者一致。
+//
+// 结果写进 document.title，所以 headless 可以直接读：
+//     msedge --headless=new --dump-dom "…/check-alluvial.html?w=1280&h=720"
+const proto = CanvasRenderingContext2D.prototype;
+const realFillText = proto.fillText;
+let texts = [];
+proto.fillText = function (text, x, y) {
+  texts.push({
+    text: String(text), x, y, align: this.textAlign, font: this.font,
+    width: this.measureText(String(text)).width,
+  });
+  return realFillText.apply(this, arguments);
+};
+const COLUMN_TITLES = new Set(['domain', 'dir', 'kind']);
+function labelOverlaps() {
+  const half = 7.5;
+  const boxes = texts.map((t) => {
+    const x0 = t.align === 'right' ? t.x - t.width
+      : t.align === 'center' ? t.x - t.width / 2 : t.x;
+    return { x0, x1: x0 + t.width, y0: t.y - half, y1: t.y + half, text: t.text };
+  }).filter((b) => !COLUMN_TITLES.has(b.text));
+  const out = [];
+  for (let i = 0; i < boxes.length; i++) {
+    for (let j = i + 1; j < boxes.length; j++) {
+      const a = boxes[i], b = boxes[j];
+      const ox = Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0);
+      const oy = Math.min(a.y1, b.y1) - Math.max(a.y0, b.y0);
+      if (ox > 1 && oy > 1) out.push(`${a.text} / ${b.text} (${ox.toFixed(1)}x${oy.toFixed(1)})`);
+    }
+  }
+  return out;
+}
+
+const q = new URLSearchParams(location.search);
+const fixedW = +(q.get('w') || 0), fixedH = +(q.get('h') || 0);
+const fixedK = +(q.get('k') || 0);
+
+const view = createAlluvialView();
+const canvas = document.getElementById('graph');
+const ctx = canvas.getContext('2d');
+let dpr = 1, cssW = 0, cssH = 0, k = 1, tx = 0, ty = 0;
+
+function paint() {
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, cssW, cssH);
+  // 世界变换：跟 host 的 render() 一样，draw 收到的是世界坐标下的 k。
+  ctx.translate(tx, ty);
+  ctx.scale(k, k);
+  texts = [];
+  view.draw(ctx, WORLD_W, WORLD_H, k);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const meta = view.getModel()?.meta;
+  document.getElementById('nodeCount').textContent = meta ? meta.declarations.toLocaleString() : '-';
+  document.getElementById('edgeCount').textContent = meta ? meta.ribbons.toLocaleString() : '-';
+  const clashes = labelOverlaps();
+  document.title = `overlaps=${clashes.length} labels=${texts.length} size=${cssW}x${cssH} k=${k.toFixed(3)}`;
+  if (clashes.length) fail('label overlap', clashes.slice(0, 4).join('; '));
+}
+function resize() {
+  dpr = Math.min(window.devicePixelRatio || 1, 2);
+  cssW = fixedW || innerWidth;
+  cssH = fixedH || innerHeight;
+  canvas.width = Math.floor(cssW * dpr);
+  canvas.height = Math.floor(cssH * dpr);
+  canvas.style.width = cssW + 'px';
+  canvas.style.height = cssH + 'px';
+  // 取景跟 host 的 fitView 一致：整体世界塞进窗口，居中。
+  k = fixedK || Math.min(cssW / WORLD_W, cssH / WORLD_H);
+  tx = cssW / 2 - (WORLD_W / 2) * k;
+  ty = cssH / 2 - (WORLD_H / 2) * k;
+  paint();
+}
+
+// Hover and click, mirroring the host's handlers, so the tooltip path is exercised too.
+const toWorld = (ev) => {
+  const r = canvas.getBoundingClientRect();
+  return [(ev.clientX - r.left - tx) / k, (ev.clientY - r.top - ty) / k];
+};
+canvas.addEventListener('mousemove', (ev) => {
+  const [wx, wy] = toWorld(ev);
+  const hit = view.pick(wx, wy);
+  if (view.sameTarget(hit, view.getHover())) return;
+  view.setHover(hit);
+  document.getElementById('hoverInfo').textContent =
+    hit ? view.describe(hit) : view.describe(view.getPinned());
+  paint();
+});
+canvas.addEventListener('click', (ev) => {
+  const [wx, wy] = toWorld(ev);
+  view.togglePinned(view.pick(wx, wy));
+  document.getElementById('hoverInfo').textContent =
+    view.describe(view.getPinned() || view.getHover());
+  paint();
+});
+canvas.addEventListener('mouseleave', () => { view.setHover(null); paint(); });
+window.addEventListener('resize', resize);
+
+try {
+  const res = await fetch('./unified-decls.json', { cache: 'no-store' });
+  if (!res.ok) throw new Error(`unified-decls.json -> HTTP ${res.status}`);
+  view.setData(await res.json());
+  document.body.classList.add('alluvial-mode');
+  view.renderLegend(document.getElementById('legend'));
+  resize();   // paint() 会写 document.title，别再覆盖它
+
+  // ?probe=1：合成一次真实的 mousemove + click，把 pick -> describe -> #hoverInfo ->
+  // togglePinned 这整条交互链在浏览器里跑一遍。Node 的 check-alluvial.mjs 只能测到
+  // pick/describe 本身，测不到事件处理器和 DOM 之间的那段接线。
+  if (q.has('probe')) {
+    const nd = view.layout.cols[0][0];
+    const at = (worldX, worldY) => [tx + worldX * k, ty + worldY * k];
+    const send = (type, [cx, cy]) => canvas.dispatchEvent(
+      new MouseEvent(type, { clientX: cx, clientY: cy, bubbles: true }));
+    const spot = at(nd.x0 + 7, nd.mid);
+    const info = () => document.getElementById('hoverInfo').textContent.split('\n')[0];
+    send('mousemove', spot);
+    const hovered = info();
+    send('click', spot);
+    const pinned = info();
+    const isPinned = view.getPinned() !== null;
+    send('click', spot);
+    const unpinned = view.getPinned() === null;
+    // 空白处不该命中任何东西。
+    send('mousemove', at(-400, -400));
+    const empty = info();
+    document.title = `probe node=${nd.name} hover="${hovered}" pinned=${isPinned} `
+      + `pin="${pinned}" unpinned=${unpinned} empty="${empty}" | ` + document.title;
+  }
+} catch (e) {
+  fail('load', e);
+}
+</script>
+</body>
+</html>

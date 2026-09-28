@@ -12,6 +12,19 @@ import { zoom, zoomIdentity } from 'https://cdn.jsdelivr.net/npm/d3-zoom@3/+esm'
 import { select } from 'https://cdn.jsdelivr.net/npm/d3-selection@3/+esm';
 import { GlRenderer } from './gl-renderer.js';
 import { createWasmSpatialIndex } from './wasm-index.js';
+// 版本号要和 index.html 里 main.js 的那个一起改 —— 只改一个的话，另一个会继续用
+// 缓存里的旧文件，于是改了代码却看不到效果（python -m http.server 忽略查询串）。
+import { createChordView } from './phil-chord.js?v=science-views-1';
+import { createAlluvialView } from './alluvial-chart.js?v=strata-flow-1';
+// 珊瑚替掉了旭日图（用户判定「层级本来就是分枝的，为什么要拍成一个圆环」）。
+// sunburst-chart.js 保留不删，只是不再 import —— 和 interdisc-network.js 一样。
+import { createCoralView } from './knowledge-coral.js?v=knowledge-coral-1';
+import { createInterdiscView } from './interdisc-matrix.js?v=interdisc-matrix-1';
+import { createMyceliumView } from './mycelium.js?v=mycelium-5';
+// evolution-river.js 保留不删，只是不再 import —— 同 sunburst-chart.js / interdisc-network.js。
+// 河流图把时间摊成几条并排的带子、高度归一到 100%，绝对体量被抹平；换成地质剖面：
+// 时间竖着走、宽度就是体量。两者共用同一份 openalex-history.json。
+import { createEvolutionView } from './evolution-strata.js?v=evolution-strata-1';
 
 // ---- 常量 ----
 const LOD_K = 3.0;             // 模式由按钮切换；该值仅作搜索定位的放大目标缩放
@@ -40,6 +53,23 @@ const OVERVIEW_ZOOM_OUT = 0.64125;  // 整体模式取景再拉远约 29%（0.9 
 const HIVE_ZOOM = 1.0;  // hive 模式取景更近：径向图在画面中更大（>1 放大，<1 拉远）
 const GIF_MODE = new URLSearchParams(location.search).has('gif') || location.hash.includes('gif');
 const GIF_MANUAL = new URLSearchParams(location.search).has('manualGif');
+const SCIENCE_ZOOM = 0.92;
+// onChange = 模块自己改了状态之后要求重画。渲染是按需的（requestRender → 单次 rAF），
+// 所以图例里的点击如果没有这条线，画布会一直停在改动之前的那一帧 —— 点「隐藏某个学科」
+// 什么也不会发生，直到下一次 mousemove 顺手重画。五个模块全部接上（见 §4）。
+// requestRender 是函数声明，提升过了，这里在它定义之前引用是安全的。
+// 哲学弦图自成一套屏幕空间几何（不经过世界坐标变换），所以不需要取景缩放。
+const philView = createChordView({ onChange: requestRender });
+// 冲积图跟其它学科模式一样画在 1600×900 的世界坐标里，所以走缩放。
+const alluvialView = createAlluvialView({ onChange: requestRender });
+// 珊瑚有自己的数据文件（coral-data.json，cluster 层的坐标/学科/文章数/概念），
+// 但术语名仍然从 sunburst-data.json 的 topics 借 —— 不重复存 274,422 个字符串。
+const coralView = createCoralView({ onChange: requestRender });
+const interdiscView = createInterdiscView({ onChange: requestRender });
+// 菌丝图和矩阵吃同一份 sunburst-data.json，但推导的是**纤维**（Σ C(k,2) = 35,313 根），
+// 不是矩阵。所以它不需要自己的数据文件，也不需要 state 里多一个槽。
+const myceliumView = createMyceliumView({ onChange: requestRender });
+const evolutionView = createEvolutionView({ onChange: requestRender });
 const GIF_OVERVIEW_MS = 2500;
 const GIF_CLASS_MS = 1200;
 const GIF_END_MS = 1000;
@@ -176,6 +206,12 @@ const $ = (id) => document.getElementById(id);
 const state = {
   data: null,
   hiveData: null,
+  scienceData: null,
+  ucsdData: null,
+  sunburstData: null,
+  coralData: null,
+  interdiscData: null,
+  evolutionData: null,
   dirColor: new Map(),      // dirName -> {color, rgb}
   nodeDirIdx: [],           // 节点 -> dir 索引
   domains: [],
@@ -195,6 +231,7 @@ const state = {
   hover: -1,
   hiveHover: '',
   hiveLocked: '',
+  scienceHover: null,
   focusDir: '',
   presentation: {
     enabled: GIF_MODE,
@@ -220,7 +257,27 @@ async function init() {
 
   try {
     state.data = await loadDatasets();
+    // 冲积图直接吃 state.data（unified-decls.json），不需要另加一份数据文件。
+    alluvialView.setData(state.data);
     state.hiveData = await loadHiveData();
+    state.scienceData = await loadScienceAtlasData();
+    state.ucsdData = await loadUcsdMapData();
+    philView.setData(await loadPhilData());
+    // 三个新图各自吃自己的数据文件，全部可选：任何一个缺失只让那一个模式画一行提示，
+    // 不许连累其它十个模式。setData 在这里就调，图例留到进模式时（switchMode）再渲染。
+    state.sunburstData = await loadSunburstData();
+    // 珊瑚：自己的数据文件（cluster 层）+ sunburst 的 topics（只借术语名）。
+    state.coralData = await loadCoralData();
+    coralView.setData(state.coralData, state.sunburstData);
+    state.interdiscData = await loadInterdiscData();
+    // 矩阵的主数据源是 sunburst 的 arcs（术语 × 学科的归属关系），现场推导出整个矩阵；
+    // interdisc-data.json 只当**可选**的第二来源做逐格交叉校验（它没有逐对的术语表）。
+    // 缺了它矩阵照样画，只是少一层独立验证 —— 见 interdisc-matrix.js 顶部。
+    interdiscView.setData(state.sunburstData, state.interdiscData);
+    // 菌丝图吃同一份 arcs，但推导的是 35,313 根纤维（Σ C(k,2)），不新增数据文件。
+    myceliumView.setData(state.sunburstData);
+    state.evolutionData = await loadEvolutionData();
+    evolutionView.setData(state.evolutionData);
   } catch (err) {
     showToast('Failed to load map data: ' + err.message);
     return;
@@ -228,6 +285,19 @@ async function init() {
   buildGraph();
   await initWasmIndex();
   buildLegend();
+  // Deep link: ?mode=philosophy opens straight into a mode without a click.
+  // Match against the set of real modes, not against a button id rebuilt from the mode
+  // name: the ids are not uniformly cased (the toolbar has btnUCSD, not btnUcsd), so the
+  // old derivation silently dropped ?mode=ucsd, and it also let ?mode=fit through to
+  // switchMode('fit') because btnFit happens to match the same pattern.
+  // 'river' 保留成别名：老深链 ?mode=river 还得能开，落到同一张图上。
+  const MODE_NAMES = ['overview', 'hive', 'atlas', 'alluvial', 'ucsd', 'philosophy', 'network',
+    'coral', 'interdisc', 'mycelium', 'evolution', 'river'];
+  const MODE_ALIASES = { river: 'evolution' };
+  const wanted = new URLSearchParams(location.search).get('mode');
+  if (wanted && wanted !== state.mode && MODE_NAMES.includes(wanted)) {
+    switchMode(MODE_ALIASES[wanted] || wanted);
+  }
   $('loading').classList.add('hidden');
   fitView(0);
   if (state.presentation.enabled && !GIF_MANUAL) startGifPresentation();
@@ -241,6 +311,83 @@ async function loadHiveData() {
     if (res.ok) return await res.json();
   } catch {
     // Hive can fall back to runtime aggregation while iterating locally.
+  }
+  return null;
+}
+
+async function loadScienceAtlasData() {
+  try {
+    const res = await fetch('science-atlas-data.json');
+    if (res.ok) return await res.json();
+  } catch {
+    // Atlas/UCSD are optional while iterating locally.
+  }
+  return null;
+}
+
+async function loadUcsdMapData() {
+  try {
+    const res = await fetch('ucsd-science-map.json');
+    if (res.ok) return await res.json();
+  } catch {
+    // UCSD mode is optional while iterating locally.
+  }
+  return null;
+}
+
+// 哲学分类弦图（由 Philpapers-API 的 pipeline --web-dir 生成）。可选：缺失时按钮仍
+// 在，但该模式下会画一行提示而不是空白画布。
+async function loadPhilData() {
+  try {
+    const res = await fetch('philpapers-chord.json');
+    if (res.ok) return await res.json();
+  } catch {
+    // Philosophy mode is optional; the science map must still load.
+  }
+  return null;
+}
+
+// 旭日图的数据文件是三者里唯一大的（约 9.3 MB：299,286 条弧、274,422 个 topic）。
+// 它是 eager load —— 跟 scienceData 一样在 init() 里载完，因为按需载会让第一次点
+// 按钮时白屏一整秒。代价（启动多 9.3 MB）已在 README 里写明。
+async function loadSunburstData() {
+  try {
+    const res = await fetch('sunburst-data.json');
+    if (res.ok) return await res.json();
+  } catch {
+    // Sunburst mode is optional; the other ten modes must still load.
+  }
+  return null;
+}
+
+// 珊瑚的 cluster 层：85,643 个簇的坐标/学科/文章数 + 426,647 个 (簇, 概念) 对，约 4.6 MB。
+// 也是 eager load —— 生长要 200 ms 左右，按需载会让第一次进模式时更久。
+async function loadCoralData() {
+  try {
+    const res = await fetch('coral-data.json');
+    if (res.ok) return await res.json();
+  } catch {
+    // Coral mode is optional; the other modes must still load.
+  }
+  return null;
+}
+
+async function loadInterdiscData() {
+  try {
+    const res = await fetch('interdisc-data.json');
+    if (res.ok) return await res.json();
+  } catch {
+    // Interdisc mode is optional.
+  }
+  return null;
+}
+
+async function loadEvolutionData() {
+  try {
+    const res = await fetch('openalex-history.json');
+    if (res.ok) return await res.json();
+  } catch {
+    // Evolution mode is optional.
   }
   return null;
 }
@@ -309,7 +456,7 @@ function resize() {
   canvas.style.height = innerHeight + 'px';
   // 最远视图＝整图铺满屏，是缩放下限，不能再缩小
   updateFitK();
-  if ((state.mode === 'overview' || state.mode === 'hive') && state.data) {
+  if (isStaticMode() && state.data) {
     state.transform = fitTransformForCurrentWorld();
     syncD3();
     requestRender();
@@ -520,7 +667,7 @@ function setupZoom() {
   // 整体模式是静态总览；网络模式才允许缩放/拖拽。
   zoomBehavior.filter((ev) => {
     if (state.presentation.enabled) return false;
-    if (state.mode === 'overview' || state.mode === 'hive') return false;
+    if (isStaticMode()) return false;
     if (ev.type === 'mousedown') return state.transform.k > state.fitK + 1e-3;
     if (ev.type === 'touchstart' && (!ev.touches || ev.touches.length === 1)) {
       return state.transform.k > state.fitK + 1e-3;
@@ -534,7 +681,7 @@ function setupZoom() {
 }
 
 function updateCanvasCursor() {
-  canvas.style.cursor = state.presentation.enabled || state.mode === 'overview' || state.mode === 'hive' ? 'default' : 'grab';
+  canvas.style.cursor = state.presentation.enabled || isStaticMode() ? 'default' : 'grab';
 }
 
 function nodeVisible(i) {
@@ -544,6 +691,25 @@ function nodeVisible(i) {
 
 function dirVisible(dir) {
   return !state.hiddenDirs.has(dir.name);
+}
+
+function isStaticMode(mode = state.mode) {
+  return mode === 'overview' || mode === 'hive' || mode === 'atlas' || mode === 'alluvial'
+    || mode === 'ucsd' || mode === 'philosophy'
+    || mode === 'coral' || mode === 'interdisc' || mode === 'mycelium' || mode === 'evolution';
+}
+
+// The three *old* science maps draw their own frame and get no HUD panel (see
+// body.science-mode in index.html). Deliberately narrower than isStaticMode: overview,
+// hive and philosophy all need their bottom-left legend to be usable.
+//
+// sunburst / interdisc / evolution are static modes but are NOT here, on purpose. Each of
+// the three carries its own long legend — 11 discipline names + colours for the sunburst and
+// the network, ten band names plus the honesty notes for the stratigraphic column — and that
+// legend *is* the colour key. Hiding the panel like the old three do would leave the reader
+// with unlabelled hues and no way to read them.
+function isScienceMapMode(mode = state.mode) {
+  return mode === 'atlas' || mode === 'ucsd' || mode === 'alluvial';
 }
 
 // 让 d3-zoom 内部状态与 state.transform 同步，防止程序化改视图后下次交互跳变/突破下限
@@ -571,7 +737,7 @@ function animateTransformTo(target, dur = 600) {
 
 // 当前模式的「世界」边界与中心：整体=1600×900；网络=纵向压缩后的 NET_PLOT 范围。
 function currentWorld() {
-  if (state.mode === 'overview' || state.mode === 'hive') {
+  if (isStaticMode()) {
     return { cx: WORLD_W / 2, cy: WORLD_H / 2, w: WORLD_W, h: WORLD_H };
   }
   if (state.networkBounds) {
@@ -592,12 +758,49 @@ function currentWorld() {
   };
 }
 
+// 只有这三个新图需要「避让左下角面板」的取景。它们三个都是把整个世界矩形从边到边画满
+// （旭日图的圆、网络图的十一边形、河流图整幅），面板一定会压到东西；旧的八个模式要么
+// 把面板藏起来（atlas/ucsd/alluvial），要么画的是散布的节点（面板压住的是空白）。
+// 刻意不推广到旧模式：那会连带改掉它们的构图，而它们的取景是历史行为。
+function panelAwareMode(mode = state.mode) {
+  return mode === 'coral' || mode === 'interdisc' || mode === 'mycelium' || mode === 'evolution';
+}
+
+// 视口里**没有被左下角面板占掉**的那块矩形。
+//
+// 为什么必须实时量，不能写成世界常量：面板是屏幕空间的固定方框（宽约 430px、贴左下），
+// 图是世界空间按 k 缩放出来的。同一个世界坐标 x=92（地层的左端）在 1600 宽的窗口里落在
+// 面板右边，在 1280 宽里就落进面板底下 —— 于是「把 PAD_L 调大」这类改法只能在
+// 某一个窗口尺寸下成立，换个尺寸就又压上了。取景直接读面板的 rect，才对每个尺寸都成立。
+//
+// 面板被隐藏（body.science-mode）或用户按「−」收起（#hud.collapsed）时退还整幅视口，
+// 于是「收起图例 = 图变大」是免费的，不用另写一条规则。
+function freeViewport() {
+  let left = 8, top = 8, right = innerWidth - 8, bottom = innerHeight - 56;
+  const hud = $('hud');
+  if (hud && getComputedStyle(hud).display !== 'none') {
+    left = Math.max(left, hud.getBoundingClientRect().right + 14);
+  }
+  // 窗口小到面板比视口还宽时不能给出负数，否则 k 是负的、整个画面翻转。
+  return { left, top, right, bottom, w: Math.max(320, right - left), h: Math.max(240, bottom - top) };
+}
+
 // 最远视图缩放（缩放下限）：按当前模式的世界尺寸铺满屏。
 function currentFitK() {
   const r = currentWorld();
-  const k = Math.min((innerWidth - 80) / r.w, (innerHeight - 60) / r.h);
+  const free = panelAwareMode() ? freeViewport() : null;
+  const k = free ? Math.min(free.w / r.w, free.h / r.h)
+    : Math.min((innerWidth - 80) / r.w, (innerHeight - 60) / r.h);
   if (state.mode === 'network') return k * NET_DEFAULT_ZOOM;
   if (state.mode === 'hive') return k * HIVE_ZOOM;
+  // 三个新图也是 1600×900 的世界，取景跟 atlas/alluvial/ucsd 同一档。
+  // 必须写全：最后的兜底是 OVERVIEW_ZOOM_OUT，它会把没列到的模式悄悄当成 overview
+  // 来取景（跑得通，只是画面比例不对，所以这种错永远不会有报错提示）。
+  if (state.mode === 'atlas' || state.mode === 'alluvial' || state.mode === 'ucsd'
+    || state.mode === 'coral' || state.mode === 'interdisc' || state.mode === 'mycelium'
+    || state.mode === 'evolution') {
+    return k * SCIENCE_ZOOM;
+  }
   return k * OVERVIEW_ZOOM_OUT;
 }
 
@@ -610,7 +813,12 @@ function updateFitK() {
 function fitTransformForCurrentWorld() {
   const k = state.fitK;
   const { cx, cy } = currentWorld();
-  return zoomIdentity.translate(innerWidth / 2 - cx * k, innerHeight / 2 - cy * k).scale(k);
+  // 面板感知的模式把世界居中到「没被面板占掉的那块」里，而不是整个视口的中心 ——
+  // 两边都居中就白避让了：图会有一半重新滑回面板底下。
+  const free = panelAwareMode() ? freeViewport() : null;
+  const mx = free ? (free.left + free.right) / 2 : innerWidth / 2;
+  const my = free ? (free.top + free.bottom) / 2 : innerHeight / 2;
+  return zoomIdentity.translate(mx - cx * k, my - cy * k).scale(k);
 }
 
 function fitView(dur = 500) {
@@ -623,17 +831,73 @@ function switchMode(mode) {
   if (state.mode === mode) return;
   state.mode = mode;
   state.hover = -1;
-  if (mode === 'overview' || mode === 'hive') state.focusDir = '';
+  state.scienceHover = null;
+  alluvialView.setHover(null);
+  coralView.setHover(null);
+  interdiscView.setHover(null);
+  myceliumView.setHover(null);
+  evolutionView.setHover(null);
+  if (isStaticMode(mode)) state.focusDir = '';
   if (mode !== 'hive') {
     state.hiveHover = '';
     state.hiveLocked = '';
   }
   $('btnOverview').classList.toggle('active', mode === 'overview');
   $('btnHive').classList.toggle('active', mode === 'hive');
+  $('btnAtlas').classList.toggle('active', mode === 'atlas');
+  $('btnAlluvial').classList.toggle('active', mode === 'alluvial');
+  $('btnUCSD').classList.toggle('active', mode === 'ucsd');
+  $('btnPhilosophy').classList.toggle('active', mode === 'philosophy');
+  $('btnCoral').classList.toggle('active', mode === 'coral');
+  $('btnInterdisc').classList.toggle('active', mode === 'interdisc');
+  $('btnMycelium').classList.toggle('active', mode === 'mycelium');
+  $('btnEvolution').classList.toggle('active', mode === 'evolution');
   $('btnNetwork').classList.toggle('active', mode === 'network');
+  // 表头那两个数字在两个学科图里量的不是同一件东西，所以标签跟着模式换。
+  // 兜底必须是声明图的那对词：没列到的模式（overview / hive / network）量的就是声明数。
+  const GAUGE_LABELS = {
+    philosophy: ['Categories', 'Cross-listings'],
+    alluvial: ['Declarations', 'Strata Ribbons'],
+    coral: ['Clusters', 'Concepts'],
+    interdisc: ['Disciplines', 'Bridging Terms'],
+    mycelium: ['Disciplines', 'Concept Fibres'],
+    evolution: ['Years', 'Fields'],
+  };
+  const labels = GAUGE_LABELS[mode] || ['Declarations', 'Relations'];
+  const gauges = document.querySelectorAll('#hud .gauge span');
+  if (gauges.length >= 2) {
+    gauges[0].textContent = labels[0];
+    gauges[1].textContent = labels[1];
+  }
+  $('hoverInfo').textContent = '';
+  $('search').placeholder = mode === 'philosophy'
+    ? 'Search categories, e.g. mind / ethics / language...'
+    : 'Search declarations, e.g. kernel / Cauchy / group...';
+  if (mode === 'philosophy') {
+    philView.renderLegend($('legend'));
+  } else if (mode === 'alluvial') {
+    alluvialView.renderLegend($('legend'));
+  } else if (mode === 'coral') {
+    coralView.renderLegend($('legend'));
+  } else if (mode === 'interdisc') {
+    interdiscView.renderLegend($('legend'));
+  } else if (mode === 'mycelium') {
+    myceliumView.renderLegend($('legend'));
+  } else if (mode === 'evolution') {
+    evolutionView.renderLegend($('legend'));
+  } else {
+    buildLegend();
+  }
+  document.body.classList.toggle('philosophy-mode', mode === 'philosophy');
+  document.body.classList.toggle('alluvial-mode', mode === 'alluvial');
+  document.body.classList.toggle('coral-mode', mode === 'coral');
+  document.body.classList.toggle('interdisc-mode', mode === 'interdisc');
+  document.body.classList.toggle('mycelium-mode', mode === 'mycelium');
+  document.body.classList.toggle('evolution-mode', mode === 'evolution');
+  document.body.classList.toggle('science-mode', isScienceMapMode(mode));
   updateFitK();
   updateCanvasCursor();
-  if (mode === 'overview' || mode === 'hive') {
+  if (isStaticMode(mode)) {
     fitView(350);
     return;
   }
@@ -645,11 +909,22 @@ function setupUI() {
   $('btnFit').onclick = () => fitView();
   $('btnOverview').onclick = () => switchMode('overview');
   $('btnHive').onclick = () => switchMode('hive');
+  $('btnAtlas').onclick = () => switchMode('atlas');
+  $('btnAlluvial').onclick = () => switchMode('alluvial');
+  $('btnUCSD').onclick = () => switchMode('ucsd');
+  $('btnPhilosophy').onclick = () => switchMode('philosophy');
+  $('btnCoral').onclick = () => switchMode('coral');
+  $('btnInterdisc').onclick = () => switchMode('interdisc');
+  $('btnMycelium').onclick = () => switchMode('mycelium');
+  $('btnEvolution').onclick = () => switchMode('evolution');
   $('btnNetwork').onclick = () => switchMode('network');
   $('btnHudToggle').onclick = () => {
     const collapsed = $('hud').classList.toggle('collapsed');
     $('btnHudToggle').textContent = collapsed ? '+' : '−';
     $('btnHudToggle').title = collapsed ? 'Show legend' : 'Hide legend';
+    // 面板收起/展开会改变「没被面板占掉的那块视口」，而面板感知的三个图正是按那块来
+    // 取景的。不重算的话，收起来腾出的空间就一直空着，图也不会跟着变大。
+    if (panelAwareMode()) { updateFitK(); fitView(300); }
   };
   $('search').addEventListener('input', (e) => onSearch(e.target.value));
   canvas.addEventListener('mousemove', onMouseMove);
@@ -657,7 +932,16 @@ function setupUI() {
   canvas.addEventListener('mouseleave', () => {
     state.hover = -1;
     state.hiveHover = '';
-    if (!state.hiveLocked) $('hoverInfo').textContent = '';
+    state.scienceHover = null;
+    philView.setHover(null);
+    // 这几个视图的状态各自独立，漏掉谁，谁的悬停高亮就会在指针离开画布之后一直黏着
+    // （冲积图原来就在漏，见 §4）。清完之后重画一次，让黏住的那一帧立刻消失。
+    alluvialView.setHover(null);
+    coralView.setHover(null);
+    interdiscView.setHover(null);
+    myceliumView.setHover(null);
+    evolutionView.setHover(null);
+    if (!state.hiveLocked) $('hoverInfo').textContent = philView.describe(philView.getPinned());
     requestRender();
   });
   if (state.presentation.enabled) {
@@ -684,6 +968,8 @@ function installGifRecorder() {
     .map((d) => d.name);
   document.body.dataset.gifReady = '1';
   document.body.dataset.gifDirs = JSON.stringify(state.presentation.dirs);
+  // 每个模式的「每个」是什么，见 gifFramePlans()。定义贴着数据，录制端照着走就行。
+  document.body.dataset.gifPlans = JSON.stringify(gifFramePlans());
   new MutationObserver(() => {
     const mode = document.body.dataset.frameMode;
     if (!mode) return;
@@ -694,6 +980,79 @@ function installGifRecorder() {
     setGifFrame(detail.mode, detail.focusDir || '');
   });
   setGifFrame(params.get('frameMode') || 'overview', params.get('frameFocus') || '');
+}
+
+// 每个模式的 GIF 帧序 = 「图例里逐行的每一个」，一处一份：
+//   alluvial  两级 —— 先逐层亮整层（7 层），再在每层内部自上而下逐个亮节点（219 个）。
+//             整条计划由 alluvial-chart.js 的 framePlan() 生成，因为层内顺序就是 layout()
+//             排出来的纵向顺序，那个知识只有那个模块有。
+//   coral / mycelium  一级 —— 一个学科一帧，只高亮不下钻。个数从各自的 getCounts() 读，
+//             不在这儿另抄一份名单（coral 的 D=11 是硬编码的，抄出来迟早对不上）。
+//   interdisc 一级 —— 也是一个学科一帧，但**每帧点开一格**：点该学科最接近的那一对
+//             （bestPartner），落到 L1「术语 × 11 学科」页。原来是只亮行+列，用户要的
+//             是点开。不能点它自己那一格 —— 对角线在 focusTerms 里恒为空页。
+//             节奏是「点开一个 → 返回 → 下一个」，所以两格之间插一帧 L0。返回帧用
+//             {type:'back'} 表示：它是 JSON 能装的结构，parseGifFocus 认得，
+//             togglePinned 也真的会退回 L0。
+//             **不能往计划里放 null** —— JSON.stringify(null) 是字符串 "null"，
+//             parseGifFocus 走不到 JSON.parse 那条路（首字符不是 '{'），会把
+//             "null" 当成一个叫 null 的裸名字节点。
+//             相邻两格落到同一个格子上就只留一格：11 个学科实测只落在 5 个格子上
+//             （平均连接聚类下互为最邻近的很多），同一页连开两次、中间只隔一帧全景，
+//             看着像卡了一下。返回帧已经保证相邻两格不会被合成器并帧，这里去重是
+//             为了避免「点开 A → 返回 → 又点开 A」这种读起来像 bug 的重复。
+// 目标类型的名字三个模块各不相同：coral 认 discipline、mycelium 认 field、
+// interdisc 认 cell。JSON 里存的就是它们 setHover/togglePinned 直接收的那个形状。
+function gifFramePlans() {
+  const oneLevel = {
+    coral: ['discipline', coralView],
+    mycelium: ['field', myceliumView],
+  };
+  const plans = { alluvial: alluvialView.framePlan() };
+  for (const [mode, [type, view]] of Object.entries(oneLevel)) {
+    const n = (view.getCounts() || {}).disciplineCount || 0;
+    plans[mode] = Array.from({ length: n }, (_, i) => ({ type, i }));
+  }
+  const nInter = (interdiscView.getCounts() || {}).disciplineCount || 0;
+  const cellKey = (t) => `${t.i}-${t.j}`;
+  const cells = Array.from({ length: nInter }, (_, i) => interdiscView.bestPartner(i))
+    .filter(Boolean)
+    .filter((t, i, all) => i === 0 || cellKey(t) !== cellKey(all[i - 1]));
+  plans.interdisc = [];
+  cells.forEach((c, i) => {
+    if (i) plans.interdisc.push({ type: 'back' });   // 点开一个 → 返回 → 下一个
+    plans.interdisc.push(c);
+  });
+  return plans;
+}
+
+// 高亮谁由 mode 决定，参数是一份 focus 目标（JSON；空串 = 全景）。
+// coral / mycelium 的强高亮读的是 pinned（`focus = pinned`），只有 togglePinned 写得进去。
+// interdisc 现在也走 togglePinned —— 但它的格子是**下钻**而不是高亮，语义是切换：
+// 同一格喂两次会把 L1 关掉。所以先无条件回 L0（back() 在 L0 上是空操作、不重绘），
+// 再点开目标。这样这套动作没有状态，重复喂同一帧也不会翻车。
+function applyGifFocus(mode, s) {
+  const target = parseGifFocus(s);
+  if (mode === 'alluvial') { alluvialView.setHover(target); return; }
+  if (mode === 'coral') { pinOnce(coralView, target); return; }
+  if (mode === 'mycelium') { pinOnce(myceliumView, target); return; }
+  if (mode === 'interdisc') {
+    interdiscView.togglePinned({ type: 'back' });
+    if (target) interdiscView.togglePinned(target);
+    return;
+  }
+}
+
+function pinOnce(view, target) {
+  // togglePinned 是**切换**语义，同一个目标喂两次反而会把它关掉。录帧端一次写两个属性、
+  // MutationObserver 合并成一次回调，本来不会重放；这层保护很便宜，写上。
+  if (!view.sameTarget(view.getPinned(), target)) view.togglePinned(target);
+}
+
+function parseGifFocus(s) {
+  if (!s) return null;
+  if (s[0] === '{') { try { return JSON.parse(s); } catch { return null; } }
+  return { type: 'node', col: 1, name: s };
 }
 
 function setGifFrame(mode, focusDir = '') {
@@ -708,6 +1067,10 @@ function setGifFrame(mode, focusDir = '') {
     state.hiveHover = '';
     state.hiveLocked = '';
   }
+  // frameFocus 对这几个模式是**结构化**的 JSON 目标（见 gifFramePlans），hive 那条老路
+  // 还是裸名字。名字里带冒号的（alluvial col 6 的 cluster 名是 `kind: leaf`）靠 JSON 才不
+  // 会被切错，这也是当初不走 `col:name` 那种字符串拼接的原因。
+  applyGifFocus(mode, focusDir);
   updateFitK();
   state.transform = fitTransformForCurrentWorld();
   syncD3();
@@ -747,6 +1110,14 @@ function playNextGifClass() {
 function onSearch(q) {
   q = q.trim().toLowerCase();
   $('searchHint').textContent = '';
+  // 哲学模式：搜索领域名或例子里的类目名，命中的弦与弧保持高亮，其余压暗。
+  if (state.mode === 'philosophy') {
+    philView.setQuery(q);
+    const hit = philView.matched();
+    $('searchHint').textContent = !q ? '' : (hit && hit.size ? `Highlighting ${hit.size} branches` : 'No matches');
+    requestRender();
+    return;
+  }
   if (!q) { state.hover = -1; requestRender(); return; }
   const nodes = state.data.nodes;
   let match = -1, count = 0;
@@ -759,12 +1130,12 @@ function onSearch(q) {
     }
   }
   if (match >= 0) {
-    if (state.mode !== 'network') {
-      state.mode = 'network';
-      $('btnNetwork').classList.add('active');
-      $('btnOverview').classList.remove('active');
-      $('btnHive').classList.remove('active');
-    }
+    // 搜索命中的一定是声明节点，所以必须落到 network 模式。这里原来手抄了一份
+    // switchMode 的活 —— 而且抄漏了 btnPhilosophy（从哲学模式搜索，Philosophy 按钮会
+    // 一直亮着；现在多了三个按钮，手抄版会漏得更多）。直接调 switchMode 就没有这份
+    // 影子清单要维护了：按钮、表头、图例、body class、缩放下限一次全对。
+    // switchMode 里的 fitView(350) 会被紧接着的 flyToNode 取消，取景仍以飞行为准。
+    if (state.mode !== 'network') switchMode('network');
     state.hover = match;
     $('searchHint').textContent = `Found ${count}+ matches; showing the first`;
     flyToNode(match);
@@ -786,6 +1157,41 @@ function onMouseMove(ev) {
     state.hiveHover = axis?.subject || '';
     updateHiveHud();
     requestRender();
+    return;
+  }
+  if (state.mode === 'atlas' || state.mode === 'ucsd') {
+    state.scienceHover = pickSciencePoint(ev);
+    updateScienceHud();
+    requestRender();
+    return;
+  }
+  // alluvial / coral / interdisc / mycelium / evolution 这五个模块遵守同一份契约：几何画在
+  // 1600×900 的世界坐标里、自己认自己的命中形状、悬停对象每次重建。所以悬停接线也只写
+  // 一份 —— 以前 alluvial 单独抄了一遍，再加四个就会变成五份几乎相同的代码。
+  const worldView = worldPickView(state.mode);
+  if (worldView) {
+    const rect = canvas.getBoundingClientRect();
+    const { x, y, k } = state.transform;
+    const hit = worldView.pick((ev.clientX - rect.left - x) / k,
+                               (ev.clientY - rect.top - y) / k);
+    // 每次移动都重建对象会让悬停状态永远不相等，所以按目标比较。
+    if (!worldView.sameTarget(hit, worldView.getHover())) {
+      worldView.setHover(hit);
+      $('hoverInfo').textContent = worldView.describe(hit || worldView.getPinned());
+      requestRender();
+    }
+    return;
+  }
+  if (state.mode === 'philosophy') {
+    const rect = canvas.getBoundingClientRect();
+    const hit = philView.pick(ev.clientX - rect.left, ev.clientY - rect.top);
+    // 每次移动都重建对象会让悬停状态永远不相等，所以按目标比较。
+    const prev = philView.getHover();
+    if (!samePhilTarget(hit, prev)) {
+      philView.setHover(hit);
+      $('hoverInfo').textContent = hit ? philView.describe(hit) : philView.describe(philView.getPinned());
+      requestRender();
+    }
     return;
   }
   if (state.mode !== 'network') { state.hover = -1; requestRender(); return; }
@@ -813,8 +1219,51 @@ function onMouseMove(ev) {
   requestRender();
 }
 
+// 哪几个模式共用「世界坐标 + 模块自己认命中形状」这条契约。返回 null 表示该模式走别的
+// 路（hive/atlas/ucsd 有自己的拾取，philosophy 是屏幕坐标，overview/network 读节点网格）。
+// 这是一张显式的表，不是 default 兜底：新模式忘了加进来时，症状是「有画面但悬停没反应」，
+// 而这里多写一行只会让某个模式多一条永远走不到的代码 —— 出错的方向不对称，所以要显式。
+function worldPickView(mode) {
+  if (mode === 'alluvial') return alluvialView;
+  if (mode === 'coral') return coralView;
+  if (mode === 'interdisc') return interdiscView;
+  if (mode === 'mycelium') return myceliumView;
+  if (mode === 'evolution') return evolutionView;
+  return null;
+}
+
+// The chord view owns the shape of its own hover targets, so it also owns the
+// question of whether two of them are the same one.
+function samePhilTarget(a, b) {
+  if (!a || !b) return !a && !b;
+  return philView.sameTarget(a, b);
+}
+
 function onCanvasClick(ev) {
-  if (state.presentation.enabled || state.mode !== 'hive') return;
+  if (state.presentation.enabled) return;
+  if (state.mode === 'philosophy') {
+    const rect = canvas.getBoundingClientRect();
+    const hit = philView.pick(ev.clientX - rect.left, ev.clientY - rect.top);
+    philView.togglePinned(hit);
+    $('hoverInfo').textContent = philView.describe(philView.getPinned() || philView.getHover());
+    requestRender();
+    return;
+  }
+  // 同上：点已钉住的那个就取消钉住，点别的就改钉它 —— 悬停会被下一次鼠标移动擦掉，
+  // 想留住一条丝带/一条弧/一个学科的数字只能靠钉住。
+  const worldView = worldPickView(state.mode);
+  if (worldView) {
+    const rect = canvas.getBoundingClientRect();
+    const { x, y, k } = state.transform;
+    const hit = worldView.pick((ev.clientX - rect.left - x) / k,
+                               (ev.clientY - rect.top - y) / k);
+    worldView.togglePinned(hit);
+    $('hoverInfo').textContent =
+      worldView.describe(worldView.getPinned() || worldView.getHover());
+    requestRender();
+    return;
+  }
+  if (state.mode !== 'hive') return;
   const axis = pickHiveAxis(ev);
   state.hiveLocked = axis ? (state.hiveLocked === axis.subject ? '' : axis.subject) : '';
   state.hiveHover = axis?.subject || '';
@@ -836,6 +1285,14 @@ function render() {
   const w = innerWidth, h = innerHeight;
   const overview = state.mode === 'overview';
   const hive = state.mode === 'hive';
+  const atlas = state.mode === 'atlas';
+  const alluvial = state.mode === 'alluvial';
+  const ucsd = state.mode === 'ucsd';
+  const philosophy = state.mode === 'philosophy';
+  const mycelium = state.mode === 'mycelium';
+  const coral = state.mode === 'coral';
+  const interdisc = state.mode === 'interdisc';
+  const evolution = state.mode === 'evolution';
   const network = state.mode === 'network';
   if (glCanvas) glCanvas.style.display = network ? 'block' : 'none';
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -851,6 +1308,16 @@ function render() {
     dirs: state.data?.dirs || [],
   });
   if (!network || !glRendered) drawBackground(w, h);
+
+  // 哲学弦图自绘屏幕空间几何，绕过世界变换（它没有平移/缩放）。
+  if (philosophy) {
+    philView.draw(ctx, w, h, dpr);
+    const meta = philView.getData()?.meta;
+    $('nodeCount').textContent = meta ? meta.categories.toLocaleString() : '-';
+    // parentPairs = every extra parent edge, which is exactly one cross-listing each.
+    $('edgeCount').textContent = meta ? meta.parentPairs.toLocaleString() : '-';
+    return;
+  }
   if (!state.data) return;
 
   const { x, y, k } = state.transform;
@@ -862,14 +1329,60 @@ function render() {
   // 模式由按钮决定（不随缩放自动切），两种模式干净切换
   if (overview) drawDirLevel(vLeft, vRight, vTop, vBottom, k);
   else if (hive) drawHive(k);
+  else if (atlas) drawScienceAtlas(k);
+  else if (alluvial) drawScienceAlluvial(k);
+  else if (ucsd) drawUcsdMap(k);
+  else if (coral) drawScienceCoral(k);
+  else if (interdisc) drawScienceInterdisc(k);
+  else if (mycelium) drawScienceMycelium(k);
+  else if (evolution) drawScienceEvolution(k);
   else drawCrisp(vLeft, vRight, vTop, vBottom, k);
   if (state.hover >= 0 && network) drawHover(k);
 
   ctx.restore();
 
   if (overview) drawAxes(k);
-  $('nodeCount').textContent = state.data.meta.conceptCount.toLocaleString();
-  $('edgeCount').textContent = state.data.meta.edgeCount.toLocaleString();
+  if (alluvial) {
+    // 冲积图读的是 unified-decls.json，不是 science-atlas-data.json —— 那两个表头的
+    // 数字来源也跟着换，否则会一直显示 0。
+    const meta = alluvialView.getModel()?.meta;
+    $('nodeCount').textContent = (meta?.declarations || 0).toLocaleString();
+    $('edgeCount').textContent = (meta?.ribbons || 0).toLocaleString();
+  } else if (atlas) {
+    $('nodeCount').textContent = (state.scienceData?.meta?.clusterCount || 0).toLocaleString();
+    $('edgeCount').textContent = (state.scienceData?.density?.length || 0).toLocaleString();
+  } else if (ucsd) {
+    $('nodeCount').textContent = (state.ucsdData?.meta?.nodeCount || 0).toLocaleString();
+    $('edgeCount').textContent = (state.ucsdData?.meta?.edgeCount || 0).toLocaleString();
+  } else if (coral || interdisc || mycelium || evolution) {
+    // 每个新图各自报自己的两个数（表头标签在 switchMode 里已经换成对应的词）。
+    // 走模块的 getCounts() 而不是读 JSON：模块已经在数它实际画出来的东西，这里再数一遍
+    // 就是第二份会跟第一份分叉的账。数据缺失时 getCounts() 返回的全是 0。
+    const counts = (coral ? coralView
+      : interdisc ? interdiscView
+        : mycelium ? myceliumView : evolutionView).getCounts() || {};
+    if (coral) {
+      // 珊瑚这两个数是 cluster 层的：簇数（数据的第三层）和 (簇, 概念) 对。
+      $('nodeCount').textContent = (counts.clusterCount || 0).toLocaleString();
+      $('edgeCount').textContent = (counts.conceptPairs || 0).toLocaleString();
+    } else if (interdisc) {
+      // 矩阵没有"边"，所以这两个数不是节点/边：是学科数，和**跨学科出现的术语数**
+      // （出现在 ≥2 个学科里的术语）。表头标签在 switchMode 里已经换成对应的词。
+      $('nodeCount').textContent = (counts.disciplineCount || 0).toLocaleString();
+      $('edgeCount').textContent = (counts.bridgingTerms || 0).toLocaleString();
+    } else if (mycelium) {
+      // 菌丝图里这个数也不是"边"：是**微纤维**的总数，= Σ C(k,2) = 35,313。
+      // 每一根 = 一个同时出现在两个学科里的术语。
+      $('nodeCount').textContent = (counts.disciplineCount || 0).toLocaleString();
+      $('edgeCount').textContent = (counts.fibreCount || 0).toLocaleString();
+    } else {
+      $('nodeCount').textContent = (counts.years || 0).toLocaleString();
+      $('edgeCount').textContent = (counts.fields || 0).toLocaleString();
+    }
+  } else {
+    $('nodeCount').textContent = state.data.meta.conceptCount.toLocaleString();
+    $('edgeCount').textContent = state.data.meta.edgeCount.toLocaleString();
+  }
   if (state.mode === 'network' && !state.presentation.enabled) requestRender();
 }
 
@@ -1021,6 +1534,427 @@ function buildRuntimeHiveData() {
     strengthNorm: 0.45,
   }));
   return { axes, relations };
+}
+
+function drawScienceAtlas(k) {
+  const atlas = state.scienceData;
+  if (!atlas) return drawScienceMissing(k);
+  drawScienceVignette();
+  drawScienceDensity(atlas, 'atlas', k);
+  drawSciencePoints(atlas.atlasPoints || [], k, 'atlas');
+  drawScienceLabels(atlas.labels || [], k, 'atlas');
+  if (state.scienceHover) drawScienceHoverPoint(state.scienceHover, k);
+}
+
+function drawUcsdMap(k) {
+  const map = state.ucsdData;
+  if (!map) return drawScienceMissing(k);
+  drawScienceVignette();
+  drawUcsdEdges(map, k);
+  drawUcsdNodes(map, k);
+  drawUcsdLabels(map, k);
+  drawUcsdLegend(map, k);
+}
+
+function drawUcsdEdges(map, k) {
+  const nodes = map.nodes || [];
+  const maxW = Math.max(1, ...(map.edges || []).map((e) => Number(e[2]) || 1));
+  ctx.save();
+  ctx.globalCompositeOperation = 'source-over';
+  for (const e of map.edges || []) {
+    const a = nodes[e[0]];
+    const b = nodes[e[1]];
+    if (!a || !b) continue;
+    const f = Math.sqrt((Number(e[2]) || 1) / maxW);
+    ctx.strokeStyle = `rgba(145,155,172,${0.018 + f * 0.08})`;
+    ctx.lineWidth = (0.35 + f * 1.1) / k;
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y);
+    const mx = (a.x + b.x) / 2;
+    const my = (a.y + b.y) / 2 - 10 / k;
+    ctx.quadraticCurveTo(mx, my, b.x, b.y);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawUcsdNodes(map, k) {
+  const nodes = [...(map.nodes || [])].sort((a, b) => (a.size || 0) - (b.size || 0));
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  for (const n of nodes) {
+    const rgb = hexToRgb(n.color || '#e5e7eb');
+    const r = (1.4 + Math.max(1, Number(n.size || 4)) * 0.62) / k;
+    ctx.fillStyle = `rgba(${rgb},0.62)`;
+    ctx.beginPath();
+    ctx.arc(n.x, n.y, Math.max(1.2 / k, r), 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawUcsdLabels(map, k) {
+  const nodes = [...(map.nodes || [])]
+    .sort((a, b) => Number(b.id === 3) - Number(a.id === 3) || (b.label.length < a.label.length ? -1 : 1))
+    .slice(0, 210);
+  const placed = [];
+  ctx.save();
+  ctx.textBaseline = 'middle';
+  for (const n of nodes) {
+    const label = cleanScienceLabel(n.label);
+    const big = ['Data Mining', 'Material Science', 'Clinical Cancer Research', 'Organic Chemistry', 'Economics', 'Algebra'].includes(n.label);
+    ctx.font = `${big ? 650 : 520} ${(big ? 10.8 : 8.6) / k}px "Segoe UI","Microsoft YaHei",sans-serif`;
+    const w = ctx.measureText(label).width;
+    const h = (big ? 13 : 10) / k;
+    const x = n.x + 7 / k;
+    const y = n.y - 3 / k;
+    const box = { x, y: y - h / 2, w, h };
+    if (!big && placed.some((b) => boxesOverlap(box, b))) continue;
+    placed.push(box);
+    ctx.fillStyle = big ? 'rgba(255,255,255,0.92)' : 'rgba(196,204,216,0.58)';
+    ctx.shadowColor = '#000';
+    ctx.shadowBlur = 4 / k;
+    ctx.fillText(label, x, y);
+  }
+  ctx.restore();
+}
+
+function drawUcsdLegend(map, k) {
+  ctx.save();
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.font = `${10 / k}px "Segoe UI","Microsoft YaHei",sans-serif`;
+  let y = 145;
+  const x = WORLD_W - 330;
+  for (const g of (map.groups || []).slice(0, 12)) {
+    const rgb = hexToRgb(g.color || '#e5e7eb');
+    ctx.fillStyle = `rgba(${rgb},0.82)`;
+    ctx.beginPath();
+    ctx.arc(x, y, 4.4 / k, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(220,228,238,0.72)';
+    ctx.fillText(`${g.name} (${g.count})`, x + 14 / k, y);
+    y += 18 / k;
+  }
+  ctx.restore();
+}
+
+// Seven-layer Strata Flow. Geometry, hit testing, and legend live in alluvial-chart.js;
+// this adapter only calls it under the shared world transform.
+function drawScienceAlluvial(k) {
+  if (!alluvialView.getModel()) return drawAlluvialMissing(k);
+  drawScienceVignette();
+  alluvialView.draw(ctx, WORLD_W, WORLD_H, k);
+}
+
+// Strata Flow reads unified-decls.json (state.data), not science-atlas-data.json.
+function drawAlluvialMissing(k) {
+  ctx.save();
+  ctx.fillStyle = '#e6edf3';
+  ctx.font = `${22 / k}px "Segoe UI","Microsoft YaHei",sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('unified-decls.json not found', WORLD_W / 2, WORLD_H / 2);
+  ctx.restore();
+}
+
+// 三个新图各自读一个数据文件，缺哪个就说哪个的名字 —— 泛泛一句 "data not found"
+// 会让人挨个去试，而这三个文件是三个不同的构建脚本产出的。
+function drawViewMissing(k, fileName) {
+  ctx.save();
+  ctx.fillStyle = '#e6edf3';
+  ctx.font = `${22 / k}px "Segoe UI","Microsoft YaHei",sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(`${fileName} not found`, WORLD_W / 2, WORLD_H / 2);
+  ctx.font = `${12 / k}px "Segoe UI","Microsoft YaHei",sans-serif`;
+  ctx.fillStyle = 'rgba(139,148,158,0.85)';
+  ctx.fillText('regenerate it with the build script in scripts/', WORLD_W / 2, WORLD_H / 2 + 30 / k);
+  ctx.restore();
+}
+
+// 三个新图的适配器形状与 drawScienceAlluvial 完全一致：世界变换由 render() 建立，
+// 这里只画自己的底纹再把世界尺寸和自己的 k 交给模块。几何、命中、图例全归模块。
+function drawScienceCoral(k) {
+  // 缺的是 coral-data.json（cluster 层）。sunburst-data.json 只用来借术语名 ——
+  // 少了它珊瑚照样长出来，只是 describe 里报不出概念名。
+  if (!coralView.getCounts()) return drawViewMissing(k, 'coral-data.json');
+  drawScienceVignette();
+  coralView.draw(ctx, WORLD_W, WORLD_H, k);
+}
+
+function drawScienceInterdisc(k) {
+  // 缺的是 sunburst-data.json —— 矩阵是从它的 arcs 推出来的，interdisc-data.json 只是可选的校验源
+  if (!interdiscView.getCounts()) return drawViewMissing(k, 'sunburst-data.json');
+  drawScienceVignette();
+  interdiscView.draw(ctx, WORLD_W, WORLD_H, k);
+}
+
+function drawScienceMycelium(k) {
+  // 同上：菌丝图也是从 sunburst-data.json 的 arcs 现场推出来的，没有自己的数据文件
+  if (!myceliumView.getCounts()) return drawViewMissing(k, 'sunburst-data.json');
+  drawScienceVignette();
+  myceliumView.draw(ctx, WORLD_W, WORLD_H, k);
+}
+
+// 地层剖面与已退役的河流图共用 openalex-history.json。
+// getCounts() 无数据时返回 null —— 这里拿它当"数据在不在"的判据（不是拿 0 当）。
+function drawScienceEvolution(k) {
+  if (!evolutionView.getCounts()) return drawViewMissing(k, 'openalex-history.json');
+  drawScienceVignette();
+  evolutionView.draw(ctx, WORLD_W, WORLD_H, k);
+}
+
+function drawScienceMissing(k) {
+  ctx.save();
+  ctx.fillStyle = '#e6edf3';
+  ctx.font = `${22 / k}px "Segoe UI","Microsoft YaHei",sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('science-atlas-data.json not found', WORLD_W / 2, WORLD_H / 2);
+  ctx.restore();
+}
+
+// All three science maps used to stamp their name and a one-line gloss here — "Atlas /
+// research volume terrain", "UCSD / classic citation-based map of science", "Alluvial /
+// every declaration, domain → dir → kind" — over the top-left of the figure. Removed at
+// the user's request; the mode is already named by the highlighted toolbar button, so the
+// stamp was restating the UI back at the reader. Only the radial glow is left.
+function drawScienceVignette() {
+  ctx.save();
+  const g = ctx.createRadialGradient(WORLD_W * 0.52, WORLD_H * 0.48, 80, WORLD_W * 0.52, WORLD_H * 0.48, 680);
+  g.addColorStop(0, 'rgba(70,86,105,0.12)');
+  g.addColorStop(1, 'rgba(20,24,31,0.0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, WORLD_W, WORLD_H);
+  ctx.restore();
+}
+
+function drawScienceDensity(atlas, mode, k) {
+  const meta = atlas.meta || {};
+  const gridW = meta.gridWidth || 180;
+  const gridH = meta.gridHeight || 100;
+  const cw = WORLD_W / gridW;
+  const ch = WORLD_H / gridH;
+  ctx.save();
+  ctx.globalCompositeOperation = 'source-over';
+  for (const cell of atlas.density || []) {
+    const density = cell.densityNorm || 0;
+    const growth = cell.growthNorm || 0;
+    if (mode === 'frontier-bg' && growth < 0.18 && density < 0.18) continue;
+    const color = scienceCategoryRgb(atlas, cell.topCategory);
+    const alpha = mode === 'atlas'
+      ? 0.035 + density * 0.34
+      : 0.012 + density * 0.05 + growth * 0.12;
+    ctx.fillStyle = `rgba(${color},${alpha})`;
+    ctx.fillRect(cell.x * cw, cell.y * ch, cw + 0.8 / k, ch + 0.8 / k);
+  }
+  ctx.restore();
+}
+
+function drawFrontierCells(atlas, k) {
+  const meta = atlas.meta || {};
+  const gridW = meta.gridWidth || 180;
+  const gridH = meta.gridHeight || 100;
+  const cw = WORLD_W / gridW;
+  const ch = WORLD_H / gridH;
+  const cells = [...(atlas.density || [])]
+    .filter((c) => (c.growthNorm || 0) > 0.36)
+    .sort((a, b) => (b.growthNorm || 0) - (a.growthNorm || 0))
+    .slice(0, 520);
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  for (const cell of cells) {
+    const color = scienceCategoryRgb(atlas, cell.topCategory);
+    const g = cell.growthNorm || 0;
+    const x = cell.x * cw + cw / 2;
+    const y = cell.y * ch + ch / 2;
+    const r = (10 + 42 * g) / k;
+    const grad = ctx.createRadialGradient(x, y, 0, x, y, r);
+    grad.addColorStop(0, `rgba(${color},${0.20 + g * 0.34})`);
+    grad.addColorStop(1, `rgba(${color},0)`);
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawSciencePoints(points, k, mode) {
+  ctx.save();
+  ctx.globalCompositeOperation = mode === 'frontier' ? 'lighter' : 'source-over';
+  const sorted = [...points].sort((a, b) => a.articles - b.articles);
+  for (const p of sorted) {
+    const rgb = scienceCategoryRgb(state.scienceData, p.category);
+    const size = Math.log1p(p.articles || 1);
+    const r = mode === 'frontier'
+      ? (0.9 + size * 0.33 + (p.growth || 0) * 0.012) / k
+      : (0.42 + size * 0.22) / k;
+    const alpha = mode === 'frontier'
+      ? 0.10 + Math.min(0.55, (p.growth || 0) / 160)
+      : 0.025 + Math.min(0.20, size / 60);
+    ctx.fillStyle = `rgba(${rgb},${alpha})`;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+// 名字压在它所命名的那片密度区域的中轴上，而不是从锚点往右挂。
+//
+// 原来是 `x = p.x + 8/k` 的左对齐 —— textAlign 从没设过，靠画布默认的 start，
+// 碰撞盒也是按左对齐写的。后果是整条名字的重量全落在锚点右侧：44 字 × 10.5px 就是
+// 230–275 世界像素宽，字心在锚点右边 120 像素开外；最右的三条（anchor x 1390–1404）
+// 冲出 1600 宽的世界框 43–79 像素，全靠 SCIENCE_ZOOM 留在视口里的那圈余量才没被画布
+// 切掉。量出来的对照：名字横跨 x∈[192,1679]，而点云自己只占 [104,1508]（左右边距
+// 104/92，本来就是居中的）—— 图看着右偏是名字造成的，不是数据。
+//
+// 锚点只是 UMAP 空间里的一个样本点；名字读起来是「给这片东西起的名字」，所以取锚点
+// 周围 ATLAS_BLOB_R 世界像素内的密度格、按 densityNorm 加权求 x 的重心。半径 80 是
+// 因为格宽 1600/180 = 8.89 世界像素，80 ≈ 9 格。实测 150 条候选：重心相对锚点中位只
+// 挪 7px、最大 33px —— 修的是「整条重量偏右」，不是把名字搬离它命名的簇。
+const ATLAS_BLOB_R = 80;
+const atlasCentreCache = new WeakMap();
+
+function atlasLabelCentre(atlas, p) {
+  let m = atlasCentreCache.get(atlas);
+  if (!m) { m = new Map(); atlasCentreCache.set(atlas, m); }
+  let c = m.get(p);
+  if (c !== undefined) return c;
+  const meta = atlas?.meta || {};
+  const gw = meta.gridWidth || 180, gh = meta.gridHeight || 100;
+  const cw = WORLD_W / gw, chh = WORLD_H / gh;
+  const r2 = ATLAS_BLOB_R * ATLAS_BLOB_R;
+  let sum = 0, wx = 0;
+  for (const cell of atlas?.density || []) {
+    const x = (cell.x + 0.5) * cw, y = (cell.y + 0.5) * chh;
+    const dx = x - p.x, dy = y - p.y;
+    if (dx * dx + dy * dy > r2) continue;
+    const w = cell.densityNorm || 0;
+    sum += w; wx += w * x;
+  }
+  // 缓存按**数据对象**存，不按 labels 数组 —— 输入是 (density, p)，数据换了对象也就换了。
+  c = sum > 0 ? wx / sum : p.x;
+  m.set(p, c);
+  return c;
+}
+
+function drawScienceLabels(labels, k, mode) {
+  ctx.save();
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  const placed = [];
+  const maxLabels = mode === 'frontier' ? 90 : 150;
+  const ranked = [...labels]
+    .filter((p) => p.label)
+    .sort((a, b) => ((b.articles || 0) + (b.growth || 0) * 35) - ((a.articles || 0) + (a.growth || 0) * 35))
+    .slice(0, maxLabels);
+  for (const p of ranked) {
+    const label = cleanScienceLabel(p.label);
+    if (!label) continue;
+    const big = (p.articles || 0) > 1500 || (mode === 'frontier' && (p.growth || 0) > 92);
+    const font = (big ? 12.5 : 10.5) / k;
+    ctx.font = `${big ? 650 : 520} ${font}px "Segoe UI","Microsoft YaHei",sans-serif`;
+    const w = ctx.measureText(label).width;
+    const h = (big ? 15 : 12) / k;
+    const y = p.y - 4 / k;
+    const half = (w + 4 / k) / 2;
+    // 再夹进世界框：字号是 1/k，所以 k 越小同一个名字在世界坐标里越宽，
+    // 实测 k ≤ 0.7 起有两三条会顶出框。默认取景 k ≈ 0.74–0.92 时这一夹不生效。
+    const x = Math.min(Math.max(atlasLabelCentre(state.scienceData, p), half), WORLD_W - half);
+    const box = { x: x - half, y: y - h / 2, w: half * 2, h };
+    if (placed.some((b) => boxesOverlap(box, b))) continue;
+    placed.push(box);
+    const rgb = scienceCategoryRgb(state.scienceData, p.category);
+    ctx.fillStyle = mode === 'frontier' ? `rgba(${rgb},0.92)` : 'rgba(235,240,248,0.82)';
+    ctx.shadowColor = '#000';
+    ctx.shadowBlur = 5 / k;
+    ctx.fillText(label, x, y);
+  }
+  ctx.restore();
+}
+
+function drawScienceHoverPoint(p, k) {
+  ctx.save();
+  const rgb = scienceCategoryRgb(state.scienceData, p.category);
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.strokeStyle = `rgba(${rgb},0.95)`;
+  ctx.lineWidth = 2 / k;
+  ctx.beginPath();
+  ctx.arc(p.x, p.y, 16 / k, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.fillStyle = '#fff';
+  ctx.font = `${13 / k}px "Segoe UI","Microsoft YaHei",sans-serif`;
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'bottom';
+  ctx.fillText(cleanScienceLabel(p.label || `Cluster ${p.id}`), p.x + 18 / k, p.y - 8 / k);
+  ctx.restore();
+}
+
+// 只在 atlas / ucsd 下被调用：冲积图的命中在 alluvial-chart.js 里，走世界坐标但用的是
+// 自己那套节点/丝带几何，不是这里的 atlasPoints 近邻查找。哲学模式同理，各走各的。
+function pickSciencePoint(ev) {
+  const atlas = state.scienceData;
+  if (!atlas) return null;
+  const rect = canvas.getBoundingClientRect();
+  const sx = ev.clientX - rect.left, sy = ev.clientY - rect.top;
+  const { x, y, k } = state.transform;
+  const wx = (sx - x) / k, wy = (sy - y) / k;
+  const points = atlas.atlasPoints;
+  const hitR = 18 / k;
+  let best = null;
+  let bestD = hitR * hitR;
+  for (const p of points || []) {
+    const dx = p.x - wx;
+    const dy = p.y - wy;
+    const d2 = dx * dx + dy * dy;
+    if (d2 < bestD) {
+      bestD = d2;
+      best = p;
+    }
+  }
+  return best;
+}
+
+function updateScienceHud() {
+  const p = state.scienceHover;
+  if (!p) {
+    $('hoverInfo').textContent = '';
+    $('hoverInfo').style.color = '';
+    return;
+  }
+  const cat = scienceCategory(state.scienceData, p.category);
+  $('hoverInfo').textContent = [
+    cleanScienceLabel(p.label || `Cluster ${p.id}`),
+    cat?.name || `Category ${p.category}`,
+    `${Number(p.articles || 0).toLocaleString()} recent articles`,
+    `growth ${Number(p.growth || 0).toFixed(1)}`,
+  ].join(' · ');
+  $('hoverInfo').style.color = cat?.color || '';
+}
+
+function scienceCategory(atlas, id) {
+  return atlas?.categories?.find((c) => Number(c.id) === Number(id));
+}
+
+function scienceCategoryRgb(atlas, id) {
+  const color = scienceCategory(atlas, id)?.color || '#e5e7eb';
+  return hexToRgb(color);
+}
+
+function cleanScienceLabel(label) {
+  return String(label || '')
+    .replace(/\s+/g, ' ')
+    .replace(/[_-]{3,}/g, ' ')
+    .trim()
+    .slice(0, 44);
+}
+
+function boxesOverlap(a, b) {
+  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
 }
 
 function drawHiveGrid(cx, cy, outerR, k) {
